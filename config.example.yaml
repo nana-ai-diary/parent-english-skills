@@ -1,0 +1,36 @@
+# ============================================================
+# 亲子英语 Skill 配置文件 / Parent English Skills Config
+# ============================================================
+# 复制本文件为 config.yaml 并修改为你的实际路径
+# Copy this file to config.yaml and update with your actual paths
+
+# ---- 视频预设 / Preset Video ----
+# bilingual-subtitles 片尾拼接的预设视频路径
+# Path to the preset outro video for bilingual-subtitles
+preset_video: "C:/Users/YOU/Videos/preset.mp4"
+
+# ---- 字体路径 / Font Path ----
+# 必须支持 CJK 字符（中文）
+# Must support CJK characters (Chinese)
+# Windows: C:/Windows/Fonts/msyh.ttc
+# macOS:   /System/Library/Fonts/STHeiti Medium.ttc
+# Linux:   /usr/share/fonts/truetype/wqy/wqy-microhei.ttc
+font_path: "C:/Windows/Fonts/msyh.ttc"
+
+# ---- YouTube Cookies / YouTube 登录 Cookie ----
+# yt-scene-finder 需要 YouTube 登录 cookie 来搜索
+# Required by yt-scene-finder for YouTube search
+# 获取方式: 浏览器安装 "Get cookies.txt LOCALLY" 扩展，导出 YouTube cookie
+youtube_cookies: "~/.agent-reach/cookies/youtube.txt"
+
+# ---- 工作目录 / Working Directory ----
+# 临时文件存放目录（字幕下载、filter.txt 等）
+# Temporary file directory (subtitle downloads, filter.txt, etc.)
+workspace: "~/.qoderworkcn/workspace"
+
+# ---- lark-cli 路径 / lark-cli Path ----
+# QoderWork 用户通常不需要修改
+# QoderWork users usually don't need to change this
+# 非 QoderWork 用户: npm install -g @anthropic/lark-cli
+# Non-QoderWork users: npm install -g @anthropic/lark-cli
+lark_cli: "~/.qoderworkcn/bin/lark-cli.cmd"
