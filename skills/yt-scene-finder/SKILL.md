@@ -4,6 +4,11 @@ description: 搜索YouTube视频并筛选适合小红书亲子英语账号二创
 version: 1.0.0
 ---
 
+> 安装时加固说明：原 skill 硬编码了作者本机的 cookie 路径与工作目录，已改为占位符。
+> - `{YOUTUBE_COOKIES}`：从 `config.example.yaml` 的 `youtube_cookies` 读取；为空则**不带 `--cookies` 参数**（仍可搜索，可能受 YouTube 限流）。
+> - `{WORKSPACE_DIR}`：字幕临时目录，用当前会话工作目录下的 `tmp/` 子目录即可，用完清理。
+> 不要把 cookie 文件提交到任何公开位置，也不要把其内容粘贴进对话。
+
 # YouTube 亲子英语素材搜索
 
 根据用户提供的场景名，搜索YouTube并筛选适合小红书"地道亲子英语"系列二创的视频素材。
@@ -22,7 +27,7 @@ version: 1.0.0
 **搜索A — yt-dlp（主力，获取结构化元数据）：**
 
 ```bash
-yt-dlp "ytsearch25:{场景名英文} kids parent toddler family" --flat-playlist --dump-json --cookies "C:\Users\32730\.agent-reach\cookies\youtube.txt" 2>nul
+yt-dlp "ytsearch25:{场景名英文} kids parent toddler family" --flat-playlist --dump-json --cookies "{YOUTUBE_COOKIES}" 2>nul
 ```
 
 提取每个视频的：id, title, duration, view_count, channel, upload_date, description。
@@ -30,7 +35,7 @@ yt-dlp "ytsearch25:{场景名英文} kids parent toddler family" --flat-playlist
 **搜索B — yt-dlp 补充搜索（换关键词角度）：**
 
 ```bash
-yt-dlp "ytsearch15:{场景名英文} with my {toddler/baby/son/daughter} real life" --flat-playlist --dump-json --cookies "C:\Users\32730\.agent-reach\cookies\youtube.txt" 2>nul
+yt-dlp "ytsearch15:{场景名英文} with my {toddler/baby/son/daughter} real life" --flat-playlist --dump-json --cookies "{YOUTUBE_COOKIES}" 2>nul
 ```
 
 **搜索C — WebSearch 补充（发现yt-dlp搜不到的长尾内容）：**
@@ -54,7 +59,7 @@ yt-dlp "ytsearch15:{场景名英文} with my {toddler/baby/son/daughter} real li
 对通过初筛的视频，尝试获取字幕来评估内容质量：
 
 ```bash
-yt-dlp --write-auto-sub --sub-lang en --skip-download --sub-format vtt -o "C:\Users\32730\.qoderworkcn\workspace\%(id)s" --cookies "C:\Users\32730\.agent-reach\cookies\youtube.txt" "https://www.youtube.com/watch?v={VIDEO_ID}" 2>nul
+yt-dlp --write-auto-sub --sub-lang en --skip-download --sub-format vtt -o "{WORKSPACE_DIR}\%(id)s" --cookies "{YOUTUBE_COOKIES}" "https://www.youtube.com/watch?v={VIDEO_ID}" 2>nul
 ```
 
 如果字幕可用，分析字幕内容判断：
@@ -115,5 +120,5 @@ yt-dlp --write-auto-sub --sub-lang en --skip-download --sub-format vtt -o "C:\Us
 - 搜索关键词用英文，因为英文亲子视频素材更丰富
 - 如果某场景搜索结果不足10个合格视频，如实告知用户，不凑数
 - 优先推荐有英文字幕（auto-generated或手动）的视频
-- yt-dlp cookies 路径：`C:\Users\32730\.agent-reach\cookies\youtube.txt`
-- 字幕下载临时目录：`C:\Users\32730\.qoderworkcn\workspace\`，分析完可清理
+- yt-dlp cookies 路径：`{YOUTUBE_COOKIES}`
+- 字幕下载临时目录：`{WORKSPACE_DIR}\`，分析完可清理

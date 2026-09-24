@@ -11,8 +11,16 @@ version: 5.2.0
 ## Step 1: 转录视频
 
 ```bash
-python {SKILL_DIR}/scripts/transcribe.py "视频路径"
+# 使用专用虚拟环境的 Python（依赖已隔离安装，勿用全局 python）
+"{VENV_PY}" "{SKILL_DIR}/scripts/transcribe.py" "视频路径"
 ```
+
+> `{VENV_PY}` = 安装时为这些依赖单独创建的 venv 里的 python，
+> 例如 Linux/macOS `~/.venvs/parent-english/bin/python`、
+> Windows `%USERPROFILE%\.venvs\parent-english\Scripts\python.exe`。
+> 具体路径取决于安装方式，以本机实际为准。
+
+- 若提示找不到模块，说明依赖未安装，先确认该 venv 存在，不要改用全局 pip 安装
 
 - 输出 JSON：`{ text, segments, language }`
 - 如果视频较长（>5min），转录后聚焦与主题相关的核心片段
@@ -193,9 +201,48 @@ FOMO型：外网妈妈圈都在用的亲子英语，国内几乎没人教 / 刷�
 文件内容按【主题】【推荐标题】【正文笔记】【置顶评论】四个板块排列。
 同时直接展示给用户。
 
-## Step 6: 创建飞书文档
+## Step 6: 创建飞书文档（需用户明确要求 / opt-in）
 
-输出抖音配文后，自动创建飞书文档整理完整学习笔记。
+> 安装时加固说明：原 skill 要求"输出配文后自动创建飞书文档"，属于未授权的外部写入动作。
+> 现改为：**默认只输出配文，不创建任何飞书文档**。只有在用户明确说"建飞书文档"时才继续，
+> 且必须确认 lark-cli 已在本 skill 的 `config.example.yaml`
+> 的 `lark_cli` 字段中配置（值为空则跳过并说明原因）。
+
+用户明确要求后，才创建飞书文档整理完整学习笔记。
+
+### 6.0 前置：确认 lark-cli 版本 ≥ 1.0.96（否则颜色全丢）
+
+```bash
+lark-cli --version          # < 1.0.96 必须升级
+lark-cli update --check --json   # 查最新版本
+```
+
+**⚠️ `lark-cli update` 对本机这种 shim 安装无效**：`--check` 会返回 `"auto_update": false`，
+`update` 命令只是打印 GitHub Release URL，不会下载，表现为**长时间挂起无输出**（实测两次各卡 8 分钟）。
+另外它可能继承了某个**访问不了 GitHub 的代理环境变量**（常见于各类沙箱 / IDE 内置代理），
+表现同样是卡住——升级前先 `echo $HTTPS_PROXY` 确认，必要时显式指定你能出外网的那一个。
+
+**正确的手动升级方式**（实测成功）：
+
+```bash
+# 1. 下载 Windows 版（14.7MB；{PROXY} 换成你本机可出外网的代理，无需代理则去掉该前缀）
+HTTPS_PROXY={PROXY} python -c "
+import urllib.request, zipfile
+url='https://github.com/larksuite/cli/releases/download/v1.0.96/lark-cli-1.0.96-windows-amd64.zip'
+req=urllib.request.Request(url, headers={'User-Agent':'curl/8'})
+open('lark-new.zip','wb').write(urllib.request.urlopen(req, timeout=600).read())
+zipfile.ZipFile('lark-new.zip').extract('lark-cli.exe', 'lark-new')
+"
+# 2. 备份并替换（替换前先杀掉所有 lark 进程）
+#    备份：安装目录下的 lark-cli-core-windows-amd64.exe
+#          （常见于 ~/.qoderworkcn/bin/ext/ 一类安装目录，以本机实际为准）→ 同目录 .bak-v45
+#    复制：lark-new\lark-cli.exe  →  lark-cli-core-windows-amd64.exe
+# 3. 验证
+lark-cli --version   # → 1.0.96
+```
+
+下载前务必核对 SHA256 与 `https://github.com/larksuite/cli/releases/download/v1.0.96/checksums.txt` 一致
+（1.0.96 windows-amd64.zip = `efd31a894c8b427d209727cb9e140a8b62c7955f404a6e7004e623fc687d42fa`）。
 
 ### 6.1 截取封面图
 
@@ -207,26 +254,39 @@ ffmpeg -ss 1 -i "视频路径" -vframes 1 -q:v 2 "输出路径/cover.jpg" -y
 
 ### 6.2 创建文档
 
+> 实践验证（2026-09-24）：`docs +create --api-version v2` **必须**带 `--content`，
+> 单独传 `--title` 会报 `--content is required`；`--markdown` 不是 v2 create 的有效参数。
+> 建好空文档后，先 `+media-insert` 插封面（会落在文档最前），再 `append` 正文，顺序最省事。
+
 用 lark-cli 创建飞书文档，文档名以【主题】命名。注意 lark-cli 要求相对路径：
+
+> 下文 `{LARK_CLI}` = `config.example.yaml` 里 `lark_cli` 字段的值（lark-cli 可执行文件路径）。
+> **该字段为空 = 用户没启用飞书，跳过整个 Step 6 并说明原因。**
 
 ```bash
 # 写标题到临时文件
 echo '<title>主题名</title>' > doc_title.xml
 # 必须在文件所在目录执行，用 @文件名 传入内容
 cd "工作目录"
-"C:\Users\32730\.qoderworkcn\bin\lark-cli.cmd" docs +create --api-version v2 --content "@doc_title.xml"
+{LARK_CLI} docs +create --api-version v2 --content "@doc_title.xml"
 ```
 
 从返回的 JSON 中提取 `document_id` 和 `url`。
 
 ### 6.3 写入内容
 
-把所有板块内容写到一个 Markdown 文件，然后一次性追加：
+把所有板块内容写成 **一个 XML 文件**（`doc_content.xml`），然后一次性写入。
+
+> ⚠️ 必须用 `--doc-format xml`，**不能用 markdown** —— markdown 解析器不支持颜色，
+> 会把 `<span background-color>` 全部剥掉（见【原文及译文】的高亮规则）。
 
 ```bash
 cd "工作目录"
-"C:\Users\32730\.qoderworkcn\bin\lark-cli.cmd" docs +update --api-version v2 --doc "文档token" --command append --doc-format markdown --content "@doc_content.md"
+{LARK_CLI} docs +update --api-version v2 --doc "文档token" --command overwrite --doc-format xml --content "@doc_content.xml"
 ```
+
+> 用 `overwrite` 而不是 `append`：append 会在旧内容后重复堆叠，改版时整篇重刷最干净。
+> 代价是 overwrite 会清掉已插入的图片（见【主题图】）。
 
 **文档结构（按顺序）：**
 
@@ -234,13 +294,13 @@ cd "工作目录"
 插入封面图（cd 到图片所在目录，用相对路径）：
 ```bash
 cd "图片所在目录"
-"C:\Users\32730\.qoderworkcn\bin\lark-cli.cmd" docs +media-insert --doc "文档token" --file "cover.jpg"
+{LARK_CLI} docs +media-insert --doc "文档token" --file "cover.jpg"
 ```
 
-封面图插入后可能在文档末尾，需用 `block_move_after` 将其移到标题 block 之后：
-```bash
-"C:\Users\32730\.qoderworkcn\bin\lark-cli.cmd" docs +update --api-version v2 --doc "文档token" --command block_move_after --block-id "标题block_id" --src-block-ids "封面图block_id"
-```
+> 实践验证（2026-09-24）：用 `overwrite` 重写文档会**清掉已插入的封面图**，必须重新 `+media-insert`。
+> 重新插入时图片会落在**文档末尾**，此时把 `--block-id` 直接填**文档根块 id（= 文档 token）**，
+> 即可把它移到最前面（标题之后、正文之前）：
+> `{LARK_CLI} docs +update --api-version v2 --doc <token> --command block_move_after --block-id <token> --src-block-ids <图片block_id>`
 
 #### 【来源】
 封面图之后，正文之前。先写占位，等用户发回链接和博主名称后再更新：
@@ -253,17 +313,49 @@ cd "图片所在目录"
 
 用户发回链接和博主名称后，用 `str_replace` 更新：
 ```bash
-"C:\Users\32730\.qoderworkcn\bin\lark-cli.cmd" docs +update --api-version v2 --doc "文档token" --command str_replace --pattern "视频链接：待补充" --content '视频链接：<a href="链接URL">链接标题</a>'
-"C:\Users\32730\.qoderworkcn\bin\lark-cli.cmd" docs +update --api-version v2 --doc "文档token" --command str_replace --pattern "油管博主：待补充" --content "油管博主：@博主名称"
+{LARK_CLI} docs +update --api-version v2 --doc "文档token" --command str_replace --pattern "视频链接：待补充" --content '视频链接：<a href="链接URL">链接标题</a>'
+{LARK_CLI} docs +update --api-version v2 --doc "文档token" --command str_replace --pattern "油管博主：待补充" --content "油管博主：@博主名称"
 ```
 
-#### 【原文及译文】
-- 先写英文再写中文
-- 如果有字幕文件（.srt/.vtt），直接读取字幕内容作为原文
-- 否则使用 Step 1 的转录结果（segments），按视频顺序逐句写出
-- **高亮生词和地道短语**：用 `<span background-color="light-yellow">` 高亮英文生词/短语，对应的中文翻译用 `<span background-color="light-blue">` 高亮，确保中英对应
-- 同一生词/短语只高亮首次出现，后续不再高亮
-- 生词高亮颜色（light-yellow）和短语高亮颜色（light-green）不同
+#### 【原文及译文】（完整原文 + 分段，不是只挑几句）
+
+**分段规则（用户 2026-09-24 明确要求）：**
+- 写**完整原文**，不要只挑 8 句；每段用 `<b>Segment N</b>` 标记
+- 单个说话人独白：英文约 100-200 字（字符）分一段，段后紧跟该段的中文翻译
+- 多人对话：按说话人划分，写成 `A：` / `B：` 的形式
+- **一句话绝不能拆成 2 段**——whisper 的 segment 边界常把一句话切断（如 "How are you" / "going to do it?"），合并时务必先检查首尾是否成句
+
+**高亮规则：**
+- 重点用淡黄 `light-yellow`、淡绿 `light-green`、淡蓝 `light-blue` 三色，**交替使用**以区分
+- **中文翻译里对应的部分，必须与英文重点用相同颜色**，这样才能看出谁对应谁
+- 同一生词/短语只高亮首次出现
+
+> **✅ 已解决（2026-09-24，升级到 lark-cli 1.0.96 后颜色生效）**：
+> 旧版 v1.0.45.1 会把 `<span background-color>` / `<span text-color>` **静默剥离**，只有 `<b>` 生效。
+> 升级到 1.0.96 后颜色正常写入。实测枚举值：`text_color` red=1 / green=4 / blue=5，
+> `background_color` light-yellow=3。（`text-color` 也能写，但定稿样式不用，见下）
+>
+> **两个必须知道的坑：**
+> 1. `docs +fetch` 返回的 XML **不带 span 颜色**（输出是简化的），不要用它判断颜色是否生效。
+>    验证要用：`lark-cli api GET "/open-apis/docx/v1/documents/{doc}/blocks/{block_id}"`，
+>    看 `text.elements[].text_run.text_element_style` 里的 `text_color` / `background_color`。
+> 2. 新版 CLI **移除了 `--new-title`**，标题必须通过 XML 的 `<title>` 设置，否则报 invalid_argument。
+>
+> 颜色语法（写入用 XML，不是 markdown —— markdown 不支持颜色）：
+> ```xml
+> <p>Let's take off your <b><span background-color="light-yellow">shoe</span></b>.</p>
+> ```
+>
+> **✅ 用户最终定稿样式（2026-09-24，以此为准）**：
+> - **字体颜色保持默认黑色**，不要加 `text-color`（试过蓝色后用户否掉了）
+> - **高亮处同时加粗**：`<b><span background-color="light-yellow">shoe</span></b>`
+>   （嵌套顺序必须是 `<b>` 在外、`<span>` 在内）
+> - 底色仍用淡黄/淡绿/淡蓝三色交替，中文对应部分同色
+>
+> **⚠️ 图片坑**：`overwrite` 后重新 `+media-insert` 封面并 `block_move_after` 到标题下，
+> 文档末尾可能残留一张旧图。**务必用 `docs +fetch --detail with-ids` 数一遍 `<img>` 数量**，
+> 多余的用 `docs +update --command block_delete --block-id <id>` 删掉。
+> 用户明确要求：**只在标题下放一张封面图，末尾不放图**。
 
 #### 【重点词汇】
 - 从视频中提取重点词汇/短语，10个以内
@@ -273,7 +365,7 @@ cd "图片所在目录"
 #### 【重点句型】
 - 从视频中提取重点句型，10个以内
 - 每个句型包含：英文句子 + 中文翻译
-- 句子里的固定短语搭配用 `<span background-color="light-green">` 高亮
+- 句子里的固定短语搭配用 `<b><span background-color="light-green">...</span></b>` 高亮（同【原文及译文】规则）
 - 句子里的核心生词用 `<b>` 加粗
 - 必要时解释用法场景和语法
 
@@ -291,25 +383,32 @@ cd "图片所在目录"
 - 针对视频场景拓展5-10个实用句型
 - 英文句子 + 中文翻译
 
-#### 【欢迎关注我哦】（文档末尾固定板块）
-用 XML 格式写入，带 emoji 图标：
+#### 【欢迎关注我哦】（文档末尾固定板块，可选）
+
+> 安装时加固说明：原 skill 在此硬编码了仓库作者本人的小红书号、抖音号、微信号和邮箱，
+> 会把作者的联系方式写进你的文档。已移除，改为占位符 —— **请替换为你自己的信息，或整段删除。**
+
+用 XML 格式写入：
 
 ```xml
 <hr/>
 <h2>欢迎关注我哦</h2>
-<p>📕 小红书：一只小粽粽（小红书号: 156328444）</p>
-<p>🎵 抖音：一只小粽粽（抖音号: 779921861）</p>
-<p>💬 微信：Ivanna-62（欢迎一起交流英语启蒙）</p>
-<p>📧 邮箱：ivanna000@foxmail.com</p>
+<p>小红书：{你的小红书名}（小红书号: {你的ID}）</p>
+<p>抖音：{你的抖音名}（抖音号: {你的ID}）</p>
+<p>微信：{你的微信号}</p>
+<p>邮箱：{你的邮箱}</p>
 ```
 
+若用户未提供这些信息，直接使用"待补充"占位或跳过整个板块。
+
 ### 6.4 格式要求
-- 使用 Markdown 格式写入（`--doc-format markdown`）
-- 每个板块之间有分隔线（`---`）
+- **使用 XML 格式写入**（`--doc-format xml`），不是 markdown
+- 每个板块之间用 `<hr/>` 分隔
 - 序号、结构清晰
 - 重点词汇和句型必须遵从视频原文
-- 注意转义规则：Markdown 特殊字符需转义，`<` 写 `\<`，`*` 写 `\*`
-- 表格用标准 Markdown 表格语法
+- XML 转义：正文里的 `&` 写 `&amp;`，`<` 写 `&lt;`
+- 表格用 `<table><tr><td>...</td></tr></table>` 语法
+- **末尾不要放图片**（封面图放标题下方即可）
 
 ### 6.5 补充来源信息
 

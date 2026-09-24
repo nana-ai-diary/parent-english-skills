@@ -38,9 +38,10 @@ def ensure_model(model_size: str) -> str:
         "vocabulary.txt", "vocabulary.json",
         "preprocessor_config.json",
     ]
+    # 安全加固（安装时修改）：原脚本此处关闭了 TLS 证书校验
+    # （check_hostname=False / verify_mode=CERT_NONE），
+    # 会导致模型权重可被中间人替换。现改为使用默认的安全上下文。
     ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
 
     for fname in files:
         dest = cache_dir / fname
