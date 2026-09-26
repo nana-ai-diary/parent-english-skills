@@ -422,7 +422,7 @@ curl -L -o $D/model.bin "https://hf-mirror.com/Systran/faster-whisper-medium/res
   比例正好是 48000/44100），codec 不同则会产出混合 codec 的 MP4。**必须先把 preset 重编码对齐**（命令见 Step 7）。
 - concat list 里写含中文的绝对路径有概率失败 → 把 preset 复制成 ASCII 临时名再写进 list。
 - 拼接用 `-c copy`（不二次压缩正片），总耗时几秒；**不要用 filter concat**，那会把整条正片重新编码一遍。
-- 交付前 ffprobe 核对：最终 duration ≈ 正片 + 片尾（如 123.79 + 1.42 = 125.18s）。
+- 交付前 ffprobe 核对：最终 duration ≈ 正片 + 片尾（实测 123.79 + 1.42 → 125.226s，差 0.02s 正常）。
 
 ---
 
