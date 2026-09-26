@@ -17,17 +17,20 @@ Burn bilingual subtitles (English + Chinese) into video with semi-transparent ba
 
 ---
 
-## Preset Outro Video（可选 / OPTIONAL）
+## Preset Outro Video（默认必做 / MANDATORY）
 
-> 安装时加固说明：原 skill 将片尾视频标记为 **ALWAYS / MANDATORY**，
-> 并硬编码了作者本机的片尾视频绝对路径（形如 `.../Videos/亲子视频-定稿/预设.mp4`）。
-> 现改为**默认不拼接**：只有当用户明确提供片尾视频路径时才执行 Step 7。
+> **用户明确要求（2026-09-26）：每次都必须在成片末尾拼接「关注我」片尾视频，不要省略。**
+> 早期加固版曾把它降级为「默认不拼接」，导致交付时漏掉片尾，用户只能自己补。**已恢复为默认必做。**
 
-**默认行为：不拼接片尾。** 仅当用户显式给出 outro 视频路径（例如 `--outro D:\xxx.mp4`）
-或在 `config.example.yaml` 中配置了非空的 `preset_video` 时，
-才在字幕烧制完成后用 ffmpeg concat demuxer 追加（见 Step 7）。
+**默认行为：必须拼接。** 执行流程：
 
-拼接前必须先确认该路径存在且用户确认过内容，否则直接跳过这一步并告知用户。
+1. 读 skills 配置文件的 `preset_video` 字段（安装后位于 `~/.workbuddy/skills/parent-english.config.yaml`，
+   模板见仓库根目录 `config.example.yaml`）。典型片尾规格：约 1.4s / 1920×1080 / 30fps。
+2. 字段非空且文件存在 → **烧完字幕后必须执行 Step 7 追加**，交付的就是带片尾的最终版。
+3. 字段为空或文件不存在 → **不要静默跳过**，先问用户片尾视频路径；拿到路径后照 Step 7 执行。
+   只有用户明确说「这条不要片尾」时才跳过，并在交付说明里注明。
+
+片尾内容通常是「欢迎关注我」一类的引导卡。拼接前确认文件可正常播放即可，不必逐帧核对。
 
 ---
 
@@ -118,12 +121,17 @@ for i, (start, end, en, cn) in enumerate(SUBS):
 
 ```python
 VW, VH = 1920, 1080
-EN_FONTSIZE = 42
-CN_FONTSIZE = 42
-LINE_GAP = 10
-SAFE_BOTTOM = 20        # CN text bottom edge distance from video bottom
-BOX_PAD_Y = 16           # vertical padding inside mask
-BOX_OPACITY = 0.86       # black mask opacity
+
+# ---- 默认走「大字 + 大遮罩」档（用户 2026-09-24 / 09-26 两次确认的偏好）----
+# 括号内是 2.0 之前的旧值，只有在用户明确要「小一点」时才回退
+EN_FONTSIZE = 62        # (42) 用户要求「字体大一点」
+CN_FONTSIZE = 60        # (42)
+LINE_GAP = 16           # (10)
+SAFE_BOTTOM = 32        # (20) CN text bottom edge distance from video bottom
+BOX_PAD_Y = 24          # (16) vertical padding inside mask
+# 遮罩不透明度：原片底部已烧硬字幕 → 1.0 全不透明（见 Pitfall 13）；无硬字幕 → 0.86
+BOX_OPACITY = 1.0       # (0.86)
+# 上面这组参数 → 遮罩高约 194px（占画面 18%），可完整盖住 1080p 底部硬字幕条（y≈905-1060）
 
 # Layout calculation
 cn_y = VH - SAFE_BOTTOM - CN_FONTSIZE   # CN text top
@@ -196,41 +204,63 @@ Visually inspect each frame for:
 - Subtitle matches audio at that timestamp
 - Apostrophes render correctly as straight `'` not curly `'`
 
-### Step 7: Append Outro Video（仅在用户指定时执行 / only if user provided）
+### Step 7: Append Outro Video（默认必做 / MANDATORY）
 
-**默认跳过本步骤。** 仅当用户提供了片尾视频路径时才执行；未提供则直接交付字幕版成片。
+**每次都要执行**，详见顶部「Preset Outro Video」一节。只有用户明确说不要片尾时才跳过。
 
 ```python
-# 由用户指定，不要使用任何硬编码路径
-PRESET_VIDEO = None  # e.g. r"D:\my\outro.mp4"
+# 从配置读取；配置为空时先问用户，不要直接置 None 就跳过
+PRESET_VIDEO = read_config()["preset_video"]   # e.g. r"<你的片尾视频>.mp4"
 ```
 
-执行前先检查 `PRESET_VIDEO` 是否为 None 或文件是否存在，任一不满足就跳过并告知用户。
+**先把预设片尾重编码成与正片一致的规格，再 concat**（实测两个坑，都会产出「看起来成功但时长/音画不对」的坏文件）：
 
-Use ffmpeg concat demuxer:
+| 不一致项 | 症状（实测） | 要求 |
+|----------|--------------|------|
+| **音频采样率不同**（preset 48k vs 正片 44.1k） | 最终 duration 变成 **136.3s** 而不是 125.2s —— 正片音轨被按 48/44.1 拉伸了约 11s，音画错位 | preset 音频必须 resample 成正片的采样率 |
+| 视频 codec 不同（preset HEVC vs 正片 H.264） | `-c copy` 侥幸能拼，但 MP4 里混合 codec，部分播放器/平台会花屏或拒绝播放 | preset 视频转成 H.264 |
+
+先 probe 正片拿到目标采样率，再重编码 preset：
+
+```bash
+# 1) 取正片的音频采样率（本机实测是 44100，请以 ffprobe 结果为准）
+ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate \
+        -of default=nw=1:nk=1 subtitled.mp4
+
+# 2) 把「关注我」片尾重编码成 H.264 + AAC@目标采样率（-ar 必须与正片一致！）
+ffmpeg -y -i preset.mp4 \
+    -c:v libx264 -preset medium -crf 20 -pix_fmt yuv420p -r 30 \
+    -c:a aac -b:a 192k -ar 44100 -ac 2 \
+    -movflags +faststart preset_h264.mp4
+```
+
+再用 concat demuxer 拼（`-c copy`，秒级完成，不二次压缩正片）：
 
 ```python
-import subprocess, os, tempfile
+import subprocess, os, tempfile, shutil
 
-# 1. Re-encode preset to match subtitled video specs (if needed)
-# Both videos must have same codec, resolution, fps, and audio format
-# Probe the subtitled video first:
-#   ffprobe -v error -show_entries stream=codec_name,width,height,r_frame_rate -of json subtitled.mp4
+# concat list 里的路径含中文时可能出问题：把重编码后的片尾复制成 ASCII 临时名再拼
+tmp_dir = tempfile.gettempdir()
+tmp_preset = os.path.join(tmp_dir, "preset_ascii.mp4")
+shutil.copyfile(preset_h264, tmp_preset)
 
-# 2. Create concat list file
-concat_list = os.path.join(tempfile.gettempdir(), "concat_list.txt")
+# 1. Create concat list file
+concat_list = os.path.join(tmp_dir, "concat_list.txt")
 with open(concat_list, "w", encoding="utf-8") as f:
     f.write(f"file '{os.path.abspath(subtitled_mp4)}'\n")
-    f.write(f"file '{os.path.abspath(preset_mp4)}'\n")
+    f.write(f"file '{tmp_preset}'\n")
 
-# 3. Concatenate
+# 2. Concatenate（-c copy，秒级完成，不二次压缩正片）
 subprocess.run([
     "ffmpeg", "-y", "-f", "concat", "-safe", "0",
     "-i", concat_list,
-    "-c", "copy",          # stream copy if formats match
+    "-c", "copy",
     "-movflags", "+faststart",
     output_final_mp4
 ], check=True)
+
+# 3. Sanity check: 最终时长 ≈ 正片时长 + 片尾时长（误差 <0.5s）
+#    ffprobe -v error -show_entries format=duration -of default=nw=1 final.mp4
 ```
 
 **IMPORTANT**: If the preset video has different resolution/codec/fps from the subtitled video, you must re-encode one of them to match before concatenation, or use the filter-based concat method:
@@ -272,15 +302,17 @@ def esc_path(p):
 
 ### Font Size by Resolution
 
-| Resolution | Font Size | LINE_GAP |
-|------------|-----------|----------|
-| 1280×720 | 32px | 8px |
-| 1920×1080 | 42px | 10px |
-| 1920×1080（用户要求「字大一点」） | EN 62 / CN 60 | 16px |
-| 3840×2160 | 84px | 20px |
+**默认档 =「大字 + 大遮罩」**（用户 2026-09-24 起两次确认的偏好，除用户明确要小字外一律用它）：
 
-「字大一点 + 遮罩大一点」的推荐组合（1080p）：`EN_FONTSIZE=62, CN_FONTSIZE=60, LINE_GAP=16, SAFE_BOTTOM=32, BOX_PAD_Y=24` → 遮罩高约 194px（占画面 18%），能完整盖住原片底部的歌词条（y≈968-1066）。
-宽度自检：`ImageFont.getlength(text)` 最大值应 < `VW - 120`。
+| Resolution | Font Size | LINE_GAP | SAFE_BOTTOM | BOX_PAD_Y | 遮罩高 |
+|------------|-----------|----------|-------------|-----------|--------|
+| **1920×1080（默认）** | **EN 62 / CN 60** | **16px** | **32px** | **24px** | **≈194px（18%）** |
+| 1280×720 | 32px | 8px | 20px | 16px | ≈110px |
+| 1920×1080（旧小字档） | 42px | 10px | 20px | 16px | ≈148px |
+| 3840×2160 | 84px | 20px | — | — | — |
+
+大字档能完整盖住原片底部的歌词条 / 关键词卡（1080p 实测硬字幕落在 y≈905-1060）。
+宽度自检：`ImageFont.getlength(text)` 最大值应 < `VW - 120`（62px 拉丁字符约可放 34 个）。
 
 ### Safe Area (Mobile Compliance)
 
@@ -356,11 +388,41 @@ curl -L -o $D/model.bin "https://hf-mirror.com/Systran/faster-whisper-medium/res
 ### 13. 遮罩不透明度要够高，否则原片硬字幕会透出来
 若原视频底部已有硬字幕，`black@0.86` 会看到明显的「鬼影」（两套字幕叠在一起）。实测 **0.96 仍有可见残影**（YUV 混合下比理论值亮），要做干净就得用 **`black@1.0` 全不透明**。判断标准：抽帧放大看遮罩区，`max` 只应来自你自己的字幕文字。
 
+**原片硬字幕的定位与复验（黄字关键词 / 歌词条通用）**：
+- 定位：按 1fps 抽 `crop=1920:150:0:930` 的底带，逐帧统计黄色像素行范围（`r>190 & g>150 & b<130`），
+  得到硬字幕的 y 区间（实测两支片子分别落在 905-940 / 956-1045）。**遮罩 `box_y` 必须在这条带的上沿之上**。
+- 复验：渲染完成后抽帧统计「自己 EN 行以下」的黄色像素数，应当为 0。
+  ⚠️ 我自己的 EN 字幕就是黄色 `0xFFD700`，所以统计区间要避开 EN 文字行（如 EN 占 y 908-976 时，只统计 y 976-1080），
+  否则会把自家文字算成残留。
+- 何时不要盖：若原片硬字幕是**关键词/单词卡**这类「补充信息」而非重复内容，盖掉会损失教学信息。
+  此时应把双语字幕块整体上移（遮罩改成不贴底的中段条带），让原关键词露在下面——务必先问用户或交付时明确提示。
+
 ### 14. 长句拆分按「乐句/词级时间戳」切，不按字符数硬切
 用户要求拆分长句时：先用 `ImageFont.getlength()` 量出实际像素宽度确认是否真的超框（1920 宽留 120px 边距 ≈ 可放 34 个 62px 拉丁字符），再用 Whisper 的词级时间戳找到自然停顿点。备注：字幕条上的英文句子即便 40 字符也可能完全放得下，不要为了「看起来长」而拆。
 
 ### 15. 不确定的短促过门句：宁可用 gap-fill 延续上一句
 歌里常有 0.5~1s 的口白/气口（两个模型给出完全不同的内容）。**不要凭猜测新增一行字幕**，直接按 gap-fill 让上一句延续到下一句开始即可；同时要在交付说明里点出这个位置。
+
+### 16. 交付的 .srt 绝对不要和成片 mp4 同目录同名（会造成「双重字幕」）
+`成片.mp4` + `成片.srt` 放在同一个文件夹 → VLC / PotPlayer / MPC / 多数播放器与预览面板会**自动加载同名 srt 并叠在硬字幕之上**，用户看到的就是「字幕重影/双重」：
+上下两套文本内容一样、位置错开几十像素、一套带黑底一套不带。用户会以为是你烧坏了。
+
+- **交付做法**：srt 放到子目录（如 `subtitle_work/srt_only/成片.srt`），或改名成不匹配 mp4 主名的名字（如 `成片.双语字幕备份.srt`）。
+- **排障三步**（判断是「文件被烧重了」还是「播放器叠了一层」）：
+  1. `ffmpeg -i 成片.mp4 -vf fps=1 -q:v 3 scan/%03d.jpg` 抽全片帧；
+  2. 检查「自己最后一行字幕以下」的行（例如 CN 底部 = `VH - SAFE_BOTTOM`）是否**纯黑**：若为纯黑就是干净的，说明多出来的那层来自外部；
+  3. 再抽同时间点的 `ffmpeg -ss T -i 原片.mp4` 帧对比：原片硬字幕应完全被遮罩盖掉。
+  另外注意原片硬字幕条的位置（可用紫色/亮度行剖面定位）：它必须整体落在遮罩 `box_y ~ VH` 之内。
+
+### 17. 片尾「关注我」视频必须拼，且预设常是 HEVC
+用户要求：**每次交付都要带片尾**，不能因为 SKILL 里写着「可选」就跳过（2026-09-26 漏了一次，用户自己补的）。
+
+- 「关注我」引导卡通常是手机/剪映导出的 **HEVC / 48kHz**，而烧字幕的成片是 **H.264 / 44.1kHz**。
+  直接 `-c copy` concat 有两个坑：**采样率不同会把整条正片音轨拉伸**（实测 125.2s 变成 136.3s，多了 11s，
+  比例正好是 48000/44100），codec 不同则会产出混合 codec 的 MP4。**必须先把 preset 重编码对齐**（命令见 Step 7）。
+- concat list 里写含中文的绝对路径有概率失败 → 把 preset 复制成 ASCII 临时名再写进 list。
+- 拼接用 `-c copy`（不二次压缩正片），总耗时几秒；**不要用 filter concat**，那会把整条正片重新编码一遍。
+- 交付前 ffprobe 核对：最终 duration ≈ 正片 + 片尾（如 123.79 + 1.42 = 125.18s）。
 
 ---
 
@@ -376,8 +438,11 @@ Before delivering the final video:
 - [ ] Check gaps: no blank moments between subtitle entries
 - [ ] Check file size: reasonable for the video length
 - [ ] Check no subtitle appears before its audio is spoken
-- [ ] （仅当指定了片尾视频时）片尾已追加到末尾
-- [ ] （仅当指定了片尾视频时）正片与片尾衔接流畅、无跳帧
+- [ ] **交付包里没有与 mp4 同目录同名的 .srt**（否则播放器会自动叠加成双重字幕，见 Pitfall 16）
+- [ ] 抽帧扫描确认：最后一行字幕以下（`VH - SAFE_BOTTOM` 到 `VH`）为纯黑，无残留文本
+- [ ] **片尾「关注我」已拼到末尾**（默认必做，见顶部 Preset Outro Video；除非用户明确说不要）
+- [ ] **片尾衔接正常**：无跳帧 / 音画错位（编码格式不一致时必须先重编码 preset，见 Pitfall 17）
+- [ ] **最终时长 ≈ 正片 + 片尾**（用 ffprobe 核对 duration，差值 <0.5s）
 
 ## Troubleshooting
 

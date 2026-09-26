@@ -5,8 +5,14 @@
 # Copy this file to config.yaml and update with your actual paths
 
 # ---- 视频预设 / Preset Video ----
-# bilingual-subtitles 片尾拼接的预设视频路径
-# Path to the preset outro video for bilingual-subtitles
+# bilingual-subtitles 片尾拼接的预设视频路径（通常是「欢迎关注我」引导卡）
+# Path to the preset outro video for bilingual-subtitles (usually a "follow me" end card)
+#
+# 默认必做：烧完字幕必须把片尾拼到末尾；此字段为空时应询问用户，不要静默跳过。
+# Mandatory by default: the outro must be appended; if empty, ask the user instead of skipping.
+#
+# 规格注意 / Note: 常见的「关注我」片尾是 HEVC + 48kHz，而字幕成片是 H.264 + 44.1kHz，
+# 直接 concat 会产出音画错位或混合 codec 的坏文件 —— 必须先重编码对齐（见 SKILL.md Step 7）。
 preset_video: "C:/Users/YOU/Videos/preset.mp4"
 
 # ---- 字体路径 / Font Path ----
