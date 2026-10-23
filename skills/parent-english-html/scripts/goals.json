@@ -1,0 +1,85 @@
+{
+  "_note": "手写覆盖某课的『今日只掌握 N 句』。自动挑选对连读旁白（整段没有逗号也没有句号）效果不好，这里人工挑含关键动作的短句。key = slug，value = {day_id: [句子]}。只写需要覆盖的 day，没写的仍走自动挑选。",
+
+  "02-diaper-change": {
+    "d1": ["Always start with clean hands.", "Always set your changing table up first."],
+    "d2": ["Unfasten your diaper and open it up.", "Wipe front to back and use a clean diaper wipe every time."],
+    "d3": ["Apply the diaper cream generously, not too thin.", "Make sure it's nice and snug around the waist and legs."]
+  },
+  "03-baby-bath": {
+    "d1": ["Have everything laid out before you get started.", "Use your elbow or your wrist to check the water."],
+    "d2": ["Heat the room before you get started.", "Don't use soap every day."],
+    "d3": ["Spot clean the diaper area and under the chin.", "Wrap baby up in a towel as quickly as possible."]
+  },
+  "04-sand-play": {
+    "d1": ["Do you want to build a sand castle?", "Let's do it."],
+    "d2": ["Draw the shape of your sand castle in the sand.", "Build up a big pile of sand, and pack it down."],
+    "d3": ["Can I show you around a little bit?", "What did you think of this castle?"]
+  },
+  "05-brush-teeth": {
+    "d1": ["Put a small amount of toothpaste on the toothbrush.", "He's able to spit really well."],
+    "d2": ["Pull the lip back and brush along the sides of the teeth.", "Brush the backs and the fronts of your teeth."]
+  },
+  "06-wash-face": {
+    "d1": ["Turn on the water and test it with your hand.", "Squeeze out the extra water, then turn off the water."],
+    "d2": ["Rub the washcloth all over your forehead and cheeks.", "Close your eyes and wash across your eyes."],
+    "d3": ["I do this at least twice to make sure my face is clean.", "I use a towel to dry my face."]
+  },
+  "07-wash-hands": {
+    "d3": ["Rinse all the suds and germs down the sink.", "Then dry your hands."]
+  },
+  "09-grocery-shopping": {
+    "d1": ["Go through the parking lot and get a cart.", "Our first stop is the free fruit snack for kids."],
+    "d2": ["Let's go get some stuff from the produce section.", "I produce one YouTube video every week."],
+    "d3": ["Let's get some lemons.", "Should I get the single ones or the bag?"]
+  },
+  "10-grocery-shopping-2": {
+    "d1": ["You can get freshly baked donuts, bread or cakes.", "I'd like half a pound of turkey, please."],
+    "d2": ["We gotta get some pretzels.", "The dairy section includes milk, yogurt and cheese."],
+    "d3": ["We are looking for plain whole milk yogurt.", "Now it's time to check out."]
+  },
+  "11-trim-nails": {
+    "d3": ["Just cut straight across.", "Use the file or buffer to smooth it out."]
+  },
+  "12-playdough": {
+    "d3": ["Let's make the playdough flat with the roller.", "Let's press it down."]
+  },
+  "13-coloring": {
+    "d3": ["Let's dip our paintbrush in some water.", "Get some more paint and continue coloring."]
+  },
+  "14-dragon-boat-festival": {
+    "d1": ["There is a special Chinese festival called the Dragon Boat Festival.", "This festival commemorates the poet Qu Yuan."],
+    "d2": ["Wash the red leaves and cut off their roots.", "Wash the sticky rice and soak it for 4 hours."],
+    "d3": ["Take two red leaves and fold them down the middle.", "Put the rice dumplings in a pot and add enough water."]
+  },
+  "25-bus-safety": {
+    "d3": ["Never be disrespectful to the driver.", "Put everything in your backpack now."]
+  },
+  "26-putting-on-socks": {
+    "d1": ["First, learn how to hold the sock.", "Put your foot in and pull the sock up."],
+    "d3": ["Grab the sock and put your thumbs inside the opening.", "Scrunch up the sock until you reach the heel."]
+  },
+  "27-taking-off-clothes": {
+    "d1": ["Sit on a low chair in front of your child.", "Let's take off your shoes."],
+    "d3": ["Let's stand up and get your shorts off.", "Take them off and get your feet out."]
+  },
+  "28-baby-clothes-words": {
+    "d2": ["This is called a onesie.", "It snaps at the bottom."]
+  },
+  "29-tying-shoelaces": {
+    "d1": ["Cross your left lace and right lace to make an X.", "Then you pull them tight."]
+  },
+  "30-zipping-up": {
+    "d3": ["Go all the way down to the bottom, then pull.", "It takes a little bit of practice."]
+  },
+  "32-putting-on-tshirt": {
+    "d1": ["Take the shirt and lie it face down on the bed.", "Bunch up the back of the shirt to the neck hole."]
+  },
+  "33-putting-on-pants": {
+    "d1": ["Sit at the edge of your bed or in a chair.", "Drape the pants across your legs, picture face up."]
+  },
+  "34-putting-on-jacket": {
+    "d1": ["Hold your sleeve, then put your arm in.", "Do the same thing with the other sleeve."],
+    "d3": ["Use both fingers and pinch it through.", "Do the same thing on your other button."]
+  }
+}
