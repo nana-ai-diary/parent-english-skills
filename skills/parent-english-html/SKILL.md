@@ -217,11 +217,48 @@ python tools/cuttail.py --list            # ④ 复查，目标：干净 100%、
 判据阈值：`尾多0` = `b ≤ 末词说完 + 0.35s`；`被切短` = `末词说完 > b + 0.20s`
 （音频把最后一个词截了）。**「被切短」和「尾多带」都要修**，前者更烦人。
 
+## 压缩与打包（发布前必做，规避整站 413）
+
+整站是**覆盖式静态发布**，且目录很容易破发布体积上限（实测触发 HTTP **413**）。
+本项目控包靠「音频转 Opus」，**不是重压视频**：
+
+**① 音频转 Opus/ogg（控包核心）**
+分段 mp3 转 `Opus-in-Ogg`（`libopus -b:a 32k -ac 1`）：对语音近透明，单声道 32k 比原 64k 再砍一半体积。
+python http.server 会把 `.ogg` 映射为 `audio/ogg`，全平台可播。
+配套动作：
+- 把各课 HTML 里的 `segNN.mp3` / `segNN_slow.mp3` 引用改成 `.ogg`（批量替换脚本 `replace_html_mp3.py`）；
+- 打包脚本 `pack_site.py` 的 `copytree` 加 `ignore=shutil.ignore_patterns('*.mp3')`，
+  **让包内永远只进 ogg、忽略所有 mp3**（源 mp3 残留在磁盘也不进包，无需真删）。
+
+**② 整站 413 实战**：视频已压到 720p `-crf 30`（约 4–5.5 MB/篇）仍超上限 →
+全部分段音频转 Opus 后，整站从 **852 MB → 646 MB** 才通过发布
+（目录 >300MB 时正解是把 audio/video 迁对象存储，本项目用转 Opus 控包够用）。
+
+**③ full.mp3 = 整视频「音频」交付物（用户术语约定）**
+用户明确：「做这个视频的 HTML、PDF 和**音频**」里的"音频" = **整视频 MP3**（即 `audio/full.mp3` 形态），不是分段 ogg。
+抽取命令（由源视频抽整轨，不做裁剪）：
+```bash
+ffmpeg -y -i <src>.mp4 -vn -c:a libmp3lame -b:a 128k -ar 44100 <课目录>/audio/full.mp3
+```
+整站页面播放的是分段 ogg；**full.mp3 不进整站页面**，作为网盘/售卖资料单独交付。
+
+**④ 旧 mp3 清理的沙箱守卫**：脚本里 `os.remove` / `shutil.rmtree` 批量删 >50 个文件会触发
+`SAFE_DELETE_BULK_CONFIRM_REQUIRED` 被 SIGTERM 静默杀掉。规避：靠 ① 的 pack_site `ignore`
+让 mp3 不进包，或把残留 mp3 改名移出目录（而非硬删）。不要写 `rm -rf` / 大批量 `os.remove` 循环。
+
+**⑤ 全套 PDF 是网盘资料，不进整站**：由 `tools/make_pdf.py <slug>` 把各课 `lesson.json` 渲染为
+`outputs/亲子英语/全套PDF/<视频基名>.pdf`（如 `42.消防车2.pdf`、`万圣节.pdf`）。
+PDF 是给用户的下载/售卖资料，**不属于整站发布源**，整站包也不含 `全套PDF/`。
+（目录页封面裂图=源 `covers/` 缺该课 jpg：`make_covers.py --only NN` 用 `VIDEO_FRAME` 取干净帧补；
+`series.json` 的 `video` 字段若带 `_双语字幕` 后缀会匹配失败，要从已压缩的 outputs 视频取帧。）
+
 ## Step 4 · 发布
 
 发布是**覆盖式**的，且用户明确要求「全部做完再一起发布」→ **必须先拿到用户明确同意**。
 发布 = 把 `outputs/亲子英语/` 作为静态站点上线（用平台的应用发布 skill）。
 目录超过 300 MB 时正解是把 `audio/ video/` 迁到对象存储，站点只留 HTML。
+**注意**：按 ③⑤，整站页面只含分段 ogg 音频；`full.mp3`（整视频「音频」）与 `全套PDF/`（各课 PDF）
+是给用户的网盘/售卖资料，单独交付，**不随整站发布**。
 
 ## 关键规格
 
@@ -232,7 +269,7 @@ python tools/cuttail.py --list            # ④ 复查，目标：干净 100%、
 | 语音覆盖不足时 | 去掉 `vad_filter` + 加 `initial_prompt`（塞该课主题词），见 `retr.py` |
 | OCR 裁剪 | `crop=iw:ih*0.30:0:ih*0.70` + 文本框纵向中心 `CY_MIN=0.33`（字幕在 y 0.83–0.99，Tip 卡在 y<0.79） |
 | RapidOCR 参数 | 必须**扁平前缀**：`RapidOCR(det_limit_side_len=960, det_limit_type='max', …)`；写成 `Det.limit_type=` 无效 |
-| full.mp3 | 44.1 kHz / 96 kbps / 单声道 |
+| full.mp3 | 44.1 kHz / **128 kbps** / 单声道（整视频「音频」交付物；用户术语约定：说"音频"即指整视频 MP3 = `audio/full.mp3`，抽轨命令见下「压缩与打包」节） |
 | segNN.mp3 | 16 kHz / 64 kbps / 单声道；`segNN_slow.mp3` = 同上 + `atempo=0.8` |
 | 视频 | 720p / `libx264 -crf 30 -preset medium -profile:v main` / `+faststart`（约 4–5.5 MB/篇） |
 | 存储 key | 每课独立 `<缩写>.check` / `<缩写>.fav`（**不要共用**，词汇 id 会跨课撞车）+ 汇总 `xhs.progress.<slug>` |
@@ -354,4 +391,4 @@ for slug in ["42-fire-truck-2","43-plane-types","44-plane-exterior","45-plane-in
   开跑前 `taskkill /IM chrome.exe /F` 清残留实例、URL 挂 `?_=<ts>` 破缓存，否则会静默复用旧图。
   改完 JS 顺手抽出页面里的 `<script>` 丢给 `node --check` 做语法自检。
 - Windows：Bash（Git Bash）常缺 coreutils，文件操作改用 PowerShell；Chrome headless 截图
-  必须输出到 `~\AppData\Local\Temp\`。
+  必须输出到 `C:\Users\32730\AppData\Local\Temp\`。
