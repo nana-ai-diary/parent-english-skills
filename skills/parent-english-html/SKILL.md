@@ -1,7 +1,7 @@
 ---
 name: parent-english-html
 description: 把一个/一批亲子英语（育儿场景）视频做成自托管的 HTML 场景学习页 —— 一个总目录 + 每课一个子页，内含自托管视频、分段精听音频（原声 + 慢速）、词汇表、场景常用句、练习、避免中式英语、文化贴士。当用户给视频要求「做成 html 学习页 / 场景学习页 / 套用模版做一个页面 / 加一课 / 全系列重建」时使用。Build self-hosted parenting-English lesson pages (video + segmented listening audio + vocab + quizzes) from raw videos.
-version: 1.8.1
+version: 1.8.2
 ---
 
 # 亲子英语视频 → HTML 场景学习页
@@ -67,6 +67,18 @@ mkdir -p <项目>/work_prep <项目>/work_ocr <项目>/work_seg "<项目>/output
 `Confucius Institute Adelaide`），目录卡片和每课页头/页脚都由它派生。
 
 ## Step 1 · 新增一课
+
+> **⚠️ 媒体规格从第一版就要对（2026-11-06 补，别等发布前再返工）**
+> 新增任何一课，`audio/` **直接生成 Opus-in-Ogg**，不要先出 mp3 再转：
+> `ffmpeg -y -i <src> -vn -c:a libopus -b:a 32k -ac 1 segNN.ogg`
+> （慢速版在 `-i` 后加 `-af atempo=0.8`）；lesson JSON 里 `part1.full` 与每个 seg 的
+> `audio` / `slow` 一律写 `.ogg`，生成的 HTML 不得出现 `.mp3` 引用。
+> `video/*.mp4` 必须 **720p 且 ≤20MB**：`tools/compress_videos.py` 目标 18.5MB、
+> AAC 64k、libx264 按片长反算视频码率，超 20MB 再 ×0.8 重压。
+> 2–3 分钟的 1080p 双语字幕成片约 38MB（如 49 舞者），直接进站会把整包顶过 413。
+> 实测：47 警察 21.87MB 超标 → 17.90MB；49 舞者 37.83MB → 18.20MB；48 老师 13.99MB 已达标。
+> 音频 27 个文件 mp3 4.35MB → ogg 1.98MB。详见下方「压缩与打包」。
+> **根因提醒**：上一轮 49 课退回到 mp3 + 1080p，就是因为没先加载本 skill 的手写 HTML。
 
 ```bash
 # ① 登记 + 生成骨架（会写 series.json 与 tools/lessons/<slug>.json）
@@ -230,6 +242,9 @@ python tools/cuttail.py --list            # ④ 复查，目标：干净 100%、
 
 ## 压缩与打包（发布前必做，规避整站 413）
 
+> 标题虽写「发布前」，但**新增单课时就得按 ogg + ≤20MB 产出**（见 Step 1 开头）；
+> 不要把 mp3 / 1080p 视频留到发布前才处理。发布前这段只负责全站体检与打包。
+
 整站是**覆盖式静态发布**，且目录很容易破发布体积上限（实测触发 HTTP **413**）。
 本项目控包靠「音频转 Opus」，**不是重压视频**：
 
@@ -266,8 +281,10 @@ PDF 是给用户的下载/售卖资料，**不属于整站发布源**，整站�
 ## Step 4 · 发布（⚠️ 固定走共享站，别新建域名）
 
 ### 两条铁律（务必遵守）
-1. **发布目标唯一固定**：所有课只进 `https://<SHARED_SITE_HOST>/`
-   这一个共享站。**禁止**新建 HTML 站点、**禁止**发到其他域名 / 沙箱。
+1. **发布目标唯一固定**：所有课只进共享站。用户说的「HTML 要放到这里」指的是**课程总目录页完整地址**：
+   `https://<SHARED_SITE_HOST>/s/<CONTENT_ROOT>/index.html`
+   （根 `/` 是激活码门禁页，不是课程页；内容根 `s/<CONTENT_ROOT>/` 由 `gate.json` 的 `content_root` 决定）。
+   **禁止**新建 HTML 站点、**禁止**发到其他域名 / 沙箱。这个地址经常被忘，每课收口时先对一遍。
 2. **先问后发**：课做完、AI 自查通过、且用户看过表示「没啥问题」之后，
    **只问一句：「要不要上线到 https://<SHARED_SITE_HOST>/？」**，
    拿到明确「要」才发。**不要**自动发布，**不要**发到别的链接。
@@ -418,6 +435,10 @@ HTML 写 `<script>location.replace('/')</script>` 的跳转页，静态资源写
 - **来源必须如实标注**。`series.json` 的 `by` 是唯一权威来源，页头 `srcbar`
   （`来源：YouTube @xxx`）、页脚版权声明（`版权归原作者（YouTube @xxx）所有`）、
   目录卡片的小字都由它派生 → 走 `apply_src.py`，别在 HTML / lesson JSON 里手改。
+  ⚠️ **用户明确要求每课都要写来源，这是最容易漏的一项**：发布前必查页头 + 页脚，
+  并跑 `python tools/apply_src.py --check`；`parent-english-pipeline` 的 `verify` 也把它列为必填项。
+  频道名可由 `pe.py fetch` 的 `--write-info-json` 自动采集写入 `by`（`pe.py source <no>` 可补抓），
+  不要靠记忆手填。
   用户分批给频道时，先在 `CHANNELS` 表里补全再 `--write`。
 - **Part 6 第一栏必须是「中式英语的英文说法」**，不是中文。
 
