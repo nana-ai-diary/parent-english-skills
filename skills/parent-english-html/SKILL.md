@@ -1,7 +1,7 @@
 ---
 name: parent-english-html
 description: 把一个/一批亲子英语（育儿场景）视频做成自托管的 HTML 场景学习页 —— 一个总目录 + 每课一个子页，内含自托管视频、分段精听音频（原声 + 慢速）、词汇表、场景常用句、练习、避免中式英语、文化贴士。当用户给视频要求「做成 html 学习页 / 场景学习页 / 套用模版做一个页面 / 加一课 / 全系列重建」时使用。Build self-hosted parenting-English lesson pages (video + segmented listening audio + vocab + quizzes) from raw videos.
-version: 1.6.0
+version: 1.8.1
 ---
 
 # 亲子英语视频 → HTML 场景学习页
@@ -17,7 +17,7 @@ version: 1.6.0
 ├── work_prep/NN/     ← 转写、字幕拼图（中间产物）
 ├── work_ocr/NN.jsonl ← OCR 烧录字幕（**英文文本的事实源**）
 ├── work_seg/NN.json  ← 分段草稿
-└── outputs/亲子英语/  ← **唯一的发布源**
+└── outputs/亲子英语/  ← 本地构建源（**发布目标见 Step 4，固定共享站，别新建域名**）
     ├── index.html            ← 总目录（读 series.json 渲染卡片 + 进度条）
     ├── covers/NN.jpg         ← 目录卡片封面
     └── 05-brush-teeth/       ← 一课 = 一个 ASCII slug 子目录
@@ -73,6 +73,13 @@ mkdir -p <项目>/work_prep <项目>/work_ocr <项目>/work_seg "<项目>/output
 python tools/bootstrap_lesson.py add --no 35 --slug 35-feeding-cat \
     --zh 喂猫 --en "Feeding the Cat" --video "37.喂猫.mp4" --cat 生活起居 --diff 2 \
     --by "@SomeChannel"     # 素材的 YouTube 频道 → source / disclaim_src 自动带上
+#    无烧录字幕、想完全手写内容的课，加 --manual：
+#    python tools/bootstrap_lesson.py add --no 47 --slug 47-police-officer \
+#        --zh 警察 --en "Police Officer" --video "警察.mp4" --cat 学习认知 \
+#        --age "2–6 岁" --diff 2 --manual
+#    → lesson JSON 标 "manual":true，且 tools/p2/47.json 写 {"manual":true}；
+#      rebuild_all 会跳过 reseg+apply_p2（不跑 OCR 对齐），直接用你写好的
+#      part2/cuts 去 build_media + build_lesson。
 
 # ② 转写（small + beam1 + temp0 + vad）+ 生成字幕拼图 sheet.jpg / tipstrip.jpg
 python tools/prep.py 35
@@ -80,6 +87,10 @@ python tools/prep.py 35
 
 # ③ OCR 烧录字幕（英文文本的事实源）
 python tools/ocr_subs.py 35
+#    没有烧录字幕的视频（如自剪素材）会自动回退到转写稿：
+#    ocr_subs.py 检测到字幕行过少时，读取 work_prep/<n>/transcript.json
+#    （或 `python tools/ocr_subs.py 35 --transcript <path>` 显式指定），
+#    把转写段当事实源写出 work_ocr/<n>.{jsonl,txt}，后续 fill 照常可用。
 
 # ④ 词级时间戳（切点精修要用；whisper word_timestamps=True，约 20 秒/课）
 python tools/wordtime.py 35
@@ -252,13 +263,109 @@ PDF 是给用户的下载/售卖资料，**不属于整站发布源**，整站�
 （目录页封面裂图=源 `covers/` 缺该课 jpg：`make_covers.py --only NN` 用 `VIDEO_FRAME` 取干净帧补；
 `series.json` 的 `video` 字段若带 `_双语字幕` 后缀会匹配失败，要从已压缩的 outputs 视频取帧。）
 
-## Step 4 · 发布
+## Step 4 · 发布（⚠️ 固定走共享站，别新建域名）
 
-发布是**覆盖式**的，且用户明确要求「全部做完再一起发布」→ **必须先拿到用户明确同意**。
-发布 = 把 `outputs/亲子英语/` 作为静态站点上线（用平台的应用发布 skill）。
-目录超过 300 MB 时正解是把 `audio/ video/` 迁到对象存储，站点只留 HTML。
-**注意**：按 ③⑤，整站页面只含分段 ogg 音频；`full.mp3`（整视频「音频」）与 `全套PDF/`（各课 PDF）
-是给用户的网盘/售卖资料，单独交付，**不随整站发布**。
+### 两条铁律（务必遵守）
+1. **发布目标唯一固定**：所有课只进 `https://<SHARED_SITE_HOST>/`
+   这一个共享站。**禁止**新建 HTML 站点、**禁止**发到其他域名 / 沙箱。
+2. **先问后发**：课做完、AI 自查通过、且用户看过表示「没啥问题」之后，
+   **只问一句：「要不要上线到 https://<SHARED_SITE_HOST>/？」**，
+   拿到明确「要」才发。**不要**自动发布，**不要**发到别的链接。
+
+### 为什么不能直接 deploy `outputs/亲子英语/`（血泪教训）
+部署工具按「目录绝对路径」绑定 app：同一目录 → 同一 app（覆盖式、保留原链接）；
+不同目录 → 新建一个 app（新域名）。共享站 `<SHARED_SITE_SLUG>` 的**真实绑定目录**是：
+
+```
+<GATE_PROJECT>/outputs/<SHARED_SITE_DIR>
+appId: <APP_ID>  （显示名「新生儿起床口语」）
+```
+
+本地构建目录 `outputs/亲子英语/`（在**当前任务** workspace 下）是**另一条路径**，
+直接 deploy 它会新建一个独立 app（曾误建 `lesson47-police`），永远碰不到共享站。
+**所以：永远 deploy 上面的 `<SHARED_SITE_SLUG>` 目录，不要 deploy `outputs/亲子英语/`。**
+
+> 若该绑定目录日后变了，读对应 `.genie` 文件（`*.wbapp_*.genie`）里的 `localDir` 字段确认
+> （`<SHARED_SITE_SLUG>` 的 genie 中 `localDir` 即上面的路径；显示名「新生儿起床口语」）。
+
+### ⚠️ 共享站是「带激活码门禁的付费站」，绝不能直接 robocopy
+（2026-11-06 事故复盘：曾把无门禁构建源直接同步进发布根目录，
+覆盖掉门禁页 + 留下裸奔副本 → 别人点课全 404、且有人免激活码就能看）
+
+发布目录 `<GATE_PROJECT>/outputs/<SHARED_SITE_DIR>/` 的**正确结构**：
+
+```
+<SHARED_SITE_SLUG>/
+├── index.html        ← 门禁页（gate.html，输入激活码）；不是课程目录页！
+├── pe-admin.html     ← 激活码管理后台
+├── pe-sdk.js         ← 云 SDK 本地副本
+├── pe-guard.js       ← 访问守卫
+├── s/index.html      ← 占位页（跳回 /），挡目录列表
+└── s/<CONTENT_ROOT>/   ← 随机内容根（gate.json 的 content_root）
+    ├── index.html    ← 48 课总目录（带守卫）
+    ├── covers/ 全套PDF/ 全套音频/
+    └── 01-xxx/ … 48-xxx/  ← 每课目录，每个 .html 都注入 <script src="/pe-guard.js">
+```
+
+门禁机制：门禁页输码 → 云端 `pe_activate` RPC 返回 `token` + `root` → 存入
+localStorage `pe.tok/pe.dev/pe.root` → 跳 `/<root>/index.html`；守卫校验凭证、
+且 `location.pathname` 必须位于 `/<root>/` 下，否则 `location.replace('/')` 弹回门禁页。
+**根目录里任何课程页 / 目录页都是无守卫的裸奔内容，等于付费内容泄露。**
+
+### 正确上线流程（加新课 / 改内容）
+1. 在**构建源**做内容，注意构建源不是当前任务 workspace，而是打包器认的那个：
+   ```
+   <GATE_PROJECT>/outputs/亲子英语/   ← pack_site.py 的 SRC
+   <GATE_PROJECT>/tools/pack_site.py   ← 门禁打包器
+   <GATE_PROJECT>/tools/gate.json      ← content_root / 云配置
+   ```
+   当前任务 workspace 的 `outputs/亲子英语/` 做完课后，把**新增内容**（课目录、`index.html`
+   总目录、`covers/NN.jpg`、`全套PDF/*.pdf`）同步进上面那个构建源；
+   音频须为 `.ogg`（Opus 32k 单声道）且 HTML 引用 `.ogg`，与旧课一致。
+   **保持构建源无守卫**，守卫由打包器统一注入。
+2. 跑打包器（它负责搬进内容根、给每个 html 注入守卫、重写门禁页/后台/SDK/守卫）：
+   ```bash
+   cd <GATE_PROJECT>
+   python tools/pack_site.py              # 输出到 .genie 的 localDir
+   python tools/pack_site.py --verify     # 体检：守卫覆盖率、门禁页是否泄露内容根
+   ```
+3. deploy 绑定目录（覆盖共享站、保留原链接）：
+   ```bash
+   # workbuddy_sites_deploy
+   directory = <GATE_PROJECT>/outputs/<SHARED_SITE_DIR>
+   entryHtml = "index.html"
+   domainPrefix = "<SHARED_SITE_SLUG>"
+   userAskedToPublish = true
+   ```
+4. **线上验证**（别只信 `verified:true`）：根 `/` 必须是门禁页（含 `pe_activate`、
+   `slug:'` 计数为 0、不含内容根路径）；内容根下目录 `slug:'` = 总课数；
+   抽查课页含 `pe-guard.js`；根目录下**不能**有课页直链 200 出真实内容。
+
+### 平台是「增量覆盖」，删文件必须写同名占位页
+发布平台**不会删除** sandbox 里已有的旧文件。本地移走裸奔副本后，线上旧 URL 仍返回
+200 且是旧内容（`Last-Modified` 不变）。因此清理时必须用**同名占位页覆盖**：
+HTML 写 `<script>location.replace('/')</script>` 的跳转页，静态资源写短文本置空，
+再重新 deploy。可复用 `<CURRENT_PROJECT>/tools/fix_site_gate.py`（`--apply`），
+它已封装「备份 → 清裸奔 → 占位覆盖 → 恢复门禁 → 补 47/48 → 体检」全流程。
+
+体积：整站约 684 MB，**413 阈值约 770 MB**，加课前先确认没超。
+
+### 网盘 / 售卖资料（不进整站）
+按「压缩与打包」③⑤，`full.mp3`（整视频「音频」）与 `全套PDF/`（各课 PDF）是网盘/售卖资料，
+单独交付，不随整站发布（整站页面只含分段 ogg 音频）。夸克 / 百度上传走 `parent-english-netdisk` skill。
+
+### 公开仓库副本必须脱敏
+本 skill 会备份到 public 仓库，**不得写入**本机绝对路径、共享站域名 / `appId` /
+激活码内容根（随机码）/ 云配置密钥 / 本地代理地址 / 用户目录名。Step 4 的这些环境值在公开副本里
+统一替换为占位符：`<SHARED_SITE_HOST>` / `<SHARED_SITE_SLUG>` / `<SHARED_SITE_DIR>` /
+`<GATE_PROJECT>` / `<CURRENT_PROJECT>` / `<APP_ID>` / `<CONTENT_ROOT>` / `%TEMP%`；
+真实值只留在本机 skill、`.genie` marker 和 workspace 记忆里。
+生成公开副本用本机工作区的 `tools/sanitize_public.py`（替换表带真实值，**只留本机、不进仓库**；
+写完强制跑敏感词校验，有残留直接抛错禁止推送），
+推送走 `github-api-sync` skill（本环境 `git push` 被阻断，改走 GitHub REST API）：
+先 `--dry-run` → 正式提交 → 用 Contents API 拉回文件再扫一遍敏感词，确认远端无残留。
+`scripts/series.json` 的 `video_dir` / `image_dir` 在公开副本里固定用 `~\Videos\...` 泛化路径，
+**本地那份带绝对路径的版本不要推**。
 
 ## 关键规格
 
@@ -331,6 +438,10 @@ PDF 是给用户的下载/售卖资料，**不属于整站发布源**，整站�
 3. **不要高亮过于简单的词**（`come on` / `let's go` / `what's this` / `yeah` / `baby` / `cat` / 好的 / 来 等）。
    用户明确反感「把读者当傻子、没话找话」式的高亮。只标**陌生词 / 固定搭配 / 词组 / 难点**
    （如 `on fire`≠`has fire`、`turn it on` 代词放中间、`just in case`）。每段 1–4 个点，紧凑 `**词**＝释义` 格式。
+   **量化护栏**：`tools/lint_highlights.py`（warn-only）把 part2 里被高亮的词和「超简单禁用词表」(SIMPLE) 比对，
+   命中即报警（如 `help` / `stop` / `call` / `city` / `lost` / `ride` / `safe` / 裸 `police` / `grandma` / `mom` / `dad` /
+   `baby` 及基础动词、系词、冠词）。**发布前跑一遍，目标 0 命中**；短语（如 `police officer` / `police car`）不会误伤，
+   因为比对只认整词、且表里无短语。命中就说明那段是凑数高亮，删掉该 span 即可（词仍保留在正文，只是不标重点）。
 4. **词汇表别凑数**：删掉一眼就懂的行（如「猫＝cat」）；被点名要拓展的 band 要真正拓展
    （例：救援工具要列 `hose / axe / helmet / hydrant / extinguisher`，不能只写「消防车 / 消防员」）。
 5. **分类（`cat`）以 `series.json` 为准**。目录页的筛选读的是 `series.json` 的 `cat`，不是 lesson JSON 的 `tags`。
@@ -391,4 +502,4 @@ for slug in ["42-fire-truck-2","43-plane-types","44-plane-exterior","45-plane-in
   开跑前 `taskkill /IM chrome.exe /F` 清残留实例、URL 挂 `?_=<ts>` 破缓存，否则会静默复用旧图。
   改完 JS 顺手抽出页面里的 `<script>` 丢给 `node --check` 做语法自检。
 - Windows：Bash（Git Bash）常缺 coreutils，文件操作改用 PowerShell；Chrome headless 截图
-  必须输出到 `C:\Users\32730\AppData\Local\Temp\`。
+  必须输出到 `%TEMP%\`。

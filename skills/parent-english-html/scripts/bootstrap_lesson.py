@@ -124,6 +124,15 @@ def cmd_add():
                    "en": "", "cn": "TODO"})
     d["part2"] = p2
     save(lj, d)
+    # --manual：这课没有烧录字幕、内容全手写，pipeline 不跑 OCR 对齐，
+    # 直接用 lesson JSON 里手写的 part2/cuts 去 build_media + build_lesson。
+    if "--manual" in sys.argv:
+        d["manual"] = True
+        save(lj, d)
+        os.makedirs(os.path.join(BASE, "p2"), exist_ok=True)
+        io.open(os.path.join(BASE, "p2", "%s.json" % n), "w", encoding="utf-8").write(
+            json.dumps({"manual": True}, ensure_ascii=False, indent=1))
+        print("✓ %s 标记为 manual（手写内容，跳过 OCR 对齐）" % slug)
     print("✓ 骨架已生成 %s（%d 段，时长 %.1fs）" % (lj, SEG_N, dur))
     print("\n下一步：\n  1) python tools/prep.py %s        # 转写 + 字幕拼图\n"
           "  2) python tools/ocr_subs.py %s     # OCR 烧录字幕\n"
@@ -157,7 +166,8 @@ def cmd_fill():
         if en:
             lines.append({"t": x["t"], "en": en})
     if len(lines) < SEG_N:
-        print("OCR 只拿到 %d 行，少于 %d 段" % (len(lines), SEG_N)); sys.exit(1)
+        print("⚠ OCR 只拿到 %d 行，少于默认 %d 段，按实际行数分组" % (len(lines), SEG_N))
+        SEG_N = len(lines)
     step = len(lines) / SEG_N
     segs, cuts = [], []
     for i in range(SEG_N):

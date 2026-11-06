@@ -99,6 +99,40 @@ def run_one(n, src, ocr, fps=FPS):
         for r in rows:
             fh.write("%7.2f  %s\n" % (r["t"], r["txt"]))
     print("[ocr] %s frames=%d lines=%d %.1fs" % (n, nf, len(rows), time.time() - t0), flush=True)
+    return len(rows)
+
+
+MIN_LINES = 3      # 烧录字幕行数低于此值，视为「无烧录字幕」，改用转写稿回退
+
+
+def pick_transcript(n):
+    """找这课的转写稿（faster-whisper 的 transcript.json）。"""
+    for p in (os.path.join(ROOT, "work_prep", n, "transcript.json"),
+              os.path.join(ROOT, "work_prep", n + ".transcript.json")):
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def synth_from_transcript(n, path):
+    """没有烧录字幕时，把转写稿当事实源，写出 work_ocr/<n>.{jsonl,txt}。"""
+    data = json.load(io.open(path, encoding="utf-8"))
+    rows = []
+    for s in data.get("segments", []):
+        txt = (s.get("text") or "").strip()
+        if txt:
+            rows.append({"t": round(float(s.get("start", 0)), 2), "txt": txt})
+    if not rows:
+        print("[ocr] %s 转写稿无可用段，跳过" % n)
+        return
+    os.makedirs(OUT, exist_ok=True)
+    with io.open(os.path.join(OUT, "%s.jsonl" % n), "w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+    with io.open(os.path.join(OUT, "%s.txt" % n), "w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write("%7.2f  %s\n" % (r["t"], r["txt"]))
+    print("[ocr] %s 转写稿回退 → %d 行（无烧录字幕）" % (n, len(rows)))
 
 
 def main():
@@ -111,13 +145,25 @@ def main():
     else:
         picks = [args[0]]
     ocr = new_ocr()
+    force_tr = "--transcript" in args
+    tr_arg = None
+    if force_tr:
+        i = args.index("--transcript")
+        tr_arg = args[i + 1] if i + 1 < len(args) else None
     for n in picks:
         l = by_n[n]
         src = l["video"] if os.path.isabs(l["video"]) else os.path.join(vdir, l["video"])
         if not os.path.exists(src):
             print("[ocr] %s SKIP %s" % (n, src), flush=True)
             continue
-        run_one(n, src, ocr)
+        cnt = run_one(n, src, ocr)
+        # 没有烧录字幕（行数过少）或显式 --transcript 时，用转写稿当事实源回退
+        if cnt < MIN_LINES or force_tr:
+            tr = tr_arg or pick_transcript(n)
+            if tr:
+                synth_from_transcript(n, tr)
+            elif force_tr:
+                print("[ocr] %s --transcript 但找不到转写稿，跳过" % n)
 
 
 if __name__ == "__main__":
