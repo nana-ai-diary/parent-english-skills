@@ -1,0 +1,53 @@
+# 公开副本示例：所有 <...> 占位符必须先替换为本机实际值，脚本才可运行
+# Public example: replace every <...> placeholder before use
+# ============================================================
+# parent-english-pipeline 配置
+# 所有路径用正斜杠；project_root 必须是纯 ASCII 路径
+# （ffmpeg drawtext / concat 对中文路径不稳定，见 bilingual-subtitles Pitfall 7）
+# ============================================================
+
+project_root: "<PROJECT_ROOT>"
+
+# 存量项目根（parent-english-html 的构建源），仅 build 的兼容检查与夸克上传用
+legacy_project: "<GATE_PROJECT>"
+
+# 片尾「关注我」视频，必须拼，见 bilingual-subtitles 顶部约定
+preset_video: "<PRESET_VIDEO>"
+outro_duration: 1.416
+
+# 字幕字体：必须是粗体 msyhbd.ttc
+# 注意 parent-english.config.yaml 里仍是 msyh.ttc（常规），那是旧值，本编排层不读它
+font_path: "C:/Windows/Fonts/msyhbd.ttc"
+en_fontsize: 62
+cn_fontsize: 60
+width_limit: 1800
+
+# 转录：全链路只跑一次，产物 transcript.json 供字幕 / HTML / 文案共用
+python_venv: "<PYTHON_VENV>"
+whisper_model: "medium"
+whisper_compute: "int8"
+
+# YouTube 下载（留空则不带 cookies）；真实外网代理
+youtube_cookies: ""
+outbound_proxy: "<PROXY>"
+
+# 定稿交付目录：网盘上传取这里的「未压缩翻译后成片」
+# 命名固定 <序号>.<主题>.mp4，如 47.警察.mp4 / 48.老师.mp4
+delivery_dir: "<DELIVERY_DIR>"
+
+# 共享站（唯一发布目标，别新建域名/别发到沙箱）
+shared_site_host: "https://<SHARED_SITE_HOST>"
+content_root: "s/<CONTENT_ROOT>"
+# 课程总目录页（用户说的「HTML 放这里」就是这个地址，不是根域名）
+shared_site_index: "https://<SHARED_SITE_HOST>/s/<CONTENT_ROOT>/index.html"
+# 门禁打包器所在项目（pack_site.py / gate.json / 无守卫构建源）
+gate_project: "<GATE_PROJECT>"
+
+# 网盘：upload_lesson.py 一条命令双传夸克 + 百度（百度走本机 bdpan.exe CLI）
+netdisk_root: "油管亲子英语"
+quark_upload_script: "<SKILLS_DIR>/parent-english-netdisk/scripts/upload_lesson.py"
+bdpan_exe: "<BDPAN_EXE>"
+
+# 双轨交付（别混用）
+#   HTML / 整站：720p libx264 crf30 压缩视频 + Opus-in-Ogg 32k 单声道分段音频（只进整站，不进网盘）
+#   网盘：定稿目录里的未压缩翻译后 MP4（带双语字幕 + 片尾）+ full.mp3 整视频音轨 128k + PDF
