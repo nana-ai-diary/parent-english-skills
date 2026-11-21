@@ -204,10 +204,14 @@ def normalize_external_result(cp: subprocess.CompletedProcess, text: str | None 
     """把外部工具的错误归一化：退出码、isError、traceback、真 FAIL 都算失败。
     返回 warnings 列表（目前主要是百度的「假 FAIL」）。
 
-    特殊情况（2026-11-06 第 48 课实测）：百度列表/回读 API 偶发 errno=-7，
-    upload_lesson.py 会把**已成功上传**的文件打印成 `FAIL [百度] …`，
-    但同一段输出里有 `✓ 已新建上传 (fsid …)` / `"status": "ok"`。
-    这类行不算失败，只作为 warning 返回；夸克侧的 FAIL 仍是真失败。
+    ⚠ 百度「假 FAIL」只代表**日志异常**，绝不代表上传成功：
+    `FAIL [百度] … : 正在上传 …` 后面跟 `✓ 已新建上传 (fsid …)` 是列表 API
+    errno=-7 造成的（2026-11-06 第 48 课实测）。这类行降级为 warning 以免
+    整步误判 failed，但**不能**据此标 upload=done —— bdpan.exe 是开放平台应用，
+    只能写 /apps/bdpan/ 应用沙箱，用户可见的 /油管亲子英语/ 里根本没有这些文件
+    （2026-11-08 用户实测：47–50 课全部「传成功」，根目录却只更新到第 46 课）。
+    真正的成功 gate 是 verify_remote_check()，必须远端回读用户可见目录。
+    夸克侧的 FAIL 仍是真失败。
     """
     blob = (text if text is not None else ((cp.stdout or "") + "\n" + (cp.stderr or "")))
     low = blob.lower()
@@ -218,6 +222,7 @@ def normalize_external_result(cp: subprocess.CompletedProcess, text: str | None 
     for m in bad_markers:
         if m in low:
             raise PipelineError(f"外部命令回报了错误标记 ({m})\n{blob.strip()[-1200:]}")
+    # 仅用于把「假 FAIL」降级成 warning，不是成功判据（见 verify_remote_check）。
     success_evidence = any(k in blob for k in
                            ("已新建上传", "fsid", '"status": "ok"', "OK    [百度]"))
     fail_lines = [ln for ln in blob.splitlines()
@@ -231,17 +236,78 @@ def normalize_external_result(cp: subprocess.CompletedProcess, text: str | None 
     return false_fails
 
 
+# bdpan.exe 是百度开放平台应用，只能写这个应用沙箱；用户打开网盘看的是 /<netdisk_root>/。
+BAIDU_SANDBOX_PREFIX = "/apps/bdpan/"
+
+
+def remote_check_path(d: Path) -> Path:
+    return d / "upload_bundle" / "remote_check.json"
+
+
 def summarize_upload(out: str) -> dict:
-    """按网盘分别统计成功证据，避免「只传了夸克」被当成全成功。"""
+    """统计**日志层**证据，明确区分「CLI 调用成功」与「用户可见目录已回读」。
+
+    百度 `✓ 已新建上传 … fsid=` / `OK [百度]` / `SKIP [百度]` / `FAIL [百度]`
+    **只代表 CLI 把文件写进了 /apps/bdpan/ 沙箱**，不代表用户可见目录里有文件。
+    2026-11-08 用户实测：47–50 课日志全是 3/3，百度根目录却只到第 46 课。
+    所以这里只报「调用条数」，`baidu_verified` 恒为 False，真正的 gate 在
+    verify_remote_check()。别再把日志统计改成成功判据。
+    """
     lines = out.splitlines()
     quark = sum(1 for ln in lines
                 if "[百度]" not in ln
                 and re.match(r"\s*(OK|SKIP)\s+\[", ln))
-    baidu = sum(1 for ln in lines
-                if "[百度]" in ln
-                and ("已新建上传" in ln or "fsid" in ln
-                     or re.match(r"\s*(OK|SKIP)\s+\[百度\]", ln)))
-    return {"quark": quark, "baidu": baidu}
+    baidu_calls = sum(
+        1 for ln in lines
+        if "已新建上传" in ln or "fsid=" in ln
+        or re.match(r"\s*(OK|SKIP|FAIL)\s+\[百度\]", ln))
+    return {
+        "quark": quark,
+        "baidu": baidu_calls,           # 兼容旧字段：仅「CLI 调用条数」
+        "baidu_calls": baidu_calls,
+        "baidu_verified": False,        # 只有 verify_remote_check() 能置 True
+        "note": "百度 CLI 落 /apps/bdpan/ 沙箱，须 MCP 搬移到用户可见目录并回读",
+    }
+
+
+def verify_remote_check(d: Path, expected: dict[str, int], visible_dir: str) -> tuple[bool, list[str]]:
+    """远端回读 gate：核对百度**用户可见**目录里的文件名与字节数。
+
+    `expected` = {网盘文件名: 本地字节数}；`visible_dir` = /<netdisk_root>/<no>.<zh>。
+    证据文件 `upload_bundle/remote_check.json` 由编排层用百度网盘 MCP 的
+    `file_list` / `file_keyword_search` 回读后写入，格式：
+
+        {"verified": true, "checked_at": "...", "channel": "baidu-netdisk MCP",
+         "baidu_visible": {"dir": "/油管亲子英语/50.感恩节",
+                           "files": {"50.感恩节.mp4": 39976242, ...}},
+         "quark": {"dir": "...", "files": {...}}}
+
+    ⚠ 日志里的 `✓ 已新建上传` / `fsid` / `SKIP [百度]` 一概不算证据。
+    ⚠ 目录以 /apps/ 开头一律判失败——那正是这次踩的坑。
+    """
+    p = remote_check_path(d)
+    if not p.exists():
+        return False, [f"缺 {p.name}：百度上传后必须做远端回读"]
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        return False, [f"{p.name} 不是合法 JSON：{e}"]
+    if not data.get("verified"):
+        return False, [f"{p.name} 里 verified != true"]
+    b = data.get("baidu_visible") or {}
+    rdir = str(b.get("dir", ""))
+    if not rdir or rdir.startswith(BAIDU_SANDBOX_PREFIX) or "/apps/" in rdir:
+        return False, [f"百度回读目录落在应用沙箱（用户不可见）：{rdir}"]
+    if visible_dir and rdir.rstrip("/") != visible_dir.rstrip("/"):
+        return False, [f"百度回读目录不匹配：期望 {visible_dir}，实际 {rdir}"]
+    rfiles = b.get("files") or {}
+    problems: list[str] = []
+    for name, size in expected.items():
+        if name not in rfiles:
+            problems.append(f"百度可见目录缺 {name}")
+        elif int(rfiles[name]) != int(size):
+            problems.append(f"百度 {name} 大小不符：远端 {rfiles[name]} / 本地 {size}")
+    return (not problems), problems
 
 
 SOURCE_KEYS = ("by", "source_url", "source_title", "source_video_id",

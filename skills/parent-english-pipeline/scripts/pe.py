@@ -24,6 +24,7 @@ except Exception:
 
 import pecore
 import qa
+import xhs_check
 
 BANNER = "parent-english-pipeline"
 
@@ -53,6 +54,16 @@ def finish(cfg: dict, d: Path, lesson: dict, stage: str, state: str,
         mark = {"done": "OK", "blocked": "BLOCKED", "failed": "FAILED",
                 "skipped": "SKIP", "pending": "PENDING"}[state]
         emit(f"[{mark}] {stage} · {pecore.STAGE_LABEL.get(stage, stage)}" + (f" — {note}" if note else ""))
+
+
+def check_xhs(d: Path) -> tuple[list[str], dict]:
+    """文案字数闸门（对齐麦田 validate.mjs：标题<=20、正文<=1000 码点）。
+    返回 (问题列表, 统计)；缺文件交给各步自己的产物检查处理，这里不重复报。"""
+    p = d / "xhs.txt"
+    if not p.exists():
+        return [], {}
+    ok, problems, stats = xhs_check.check_file(p)
+    return ([] if ok else problems), stats
 
 
 def skip_if_done(lesson: dict, stage: str, force: bool) -> bool:
@@ -93,8 +104,172 @@ def status_lines(cfg: dict, d: Path, lesson: dict) -> list[str]:
     return out
 
 
-def html_check(d: Path) -> tuple[list[str], list[str]]:
-    """轻量 HTML 体检：资源存在 / div 配平 / 七个 Part 齐全。"""
+VIDEO_EXT = {".mp4", ".mov", ".webm", ".m4v"}
+AUDIO_EXT = {".mp3", ".ogg", ".oga", ".opus", ".m4a", ".aac", ".wav", ".flac", ".wma"}
+LOSSY_AUDIO = {"mp3", "aac", "opus", "vorbis"}
+MEDIA_EXT = VIDEO_EXT | AUDIO_EXT
+
+
+def _ffprobe_exe(cfg: dict) -> str | None:
+    """优先用 config 里显式指定的，其次找 PATH；找不到就返回 None（不假成功）。"""
+    p = cfg.get("ffprobe")
+    if p and Path(p).exists():
+        return str(p)
+    try:
+        return pecore.tool("ffprobe")
+    except pecore.PipelineError:
+        return None
+
+
+def _probe_media(exe: str, p: Path) -> dict:
+    cp = pecore.run([exe, "-v", "error", "-show_entries",
+                     "format=duration,size,bit_rate:stream=codec_type,codec_name,"
+                     "width,height,r_frame_rate,sample_rate,channels,bit_rate",
+                     "-of", "json", str(p)], timeout=180)
+    if cp.returncode != 0:
+        raise pecore.PipelineError(f"ffprobe 读不出 {p.name}: {(cp.stderr or '').strip()[:160]}")
+    return json.loads(cp.stdout or "{}")
+
+
+def _audio_kbps(stream: dict, fmt: dict, p: Path) -> float:
+    """VBR / ogg 常缺 stream.bit_rate，退回容器码率，再退回 size*8/duration。"""
+    raw = stream.get("bit_rate") or fmt.get("bit_rate")
+    try:
+        if raw and float(raw) > 0:
+            return float(raw) / 1000
+    except (TypeError, ValueError):
+        pass
+    try:
+        dur = float(fmt.get("duration") or 0)
+        if dur > 0:
+            return p.stat().st_size * 8 / dur / 1000
+    except (TypeError, ValueError, OSError):
+        pass
+    return 0.0
+
+
+def media_audit(d: Path, cfg: dict | None = None) -> tuple[list[str], list[str]]:
+    """ffprobe 实测 html/ 下所有音视频：视频 H.264 / <=720p / <=20MB，音频有损且码率达标。
+
+    只看 html/ 这个发布源；网盘 upload_bundle/ 按规范保留未压缩 final.mp4，不在本核查范围。
+    报告写 reports/media_audit.md，返回 (probs, notes) 供 build / verify 判定。
+    """
+    cfg = cfg or {}
+    max_mb = float(cfg.get("html_video_max_mb", 20))
+    max_h = int(cfg.get("html_video_max_height", 720))
+    max_kbps = float(cfg.get("html_audio_max_kbps", 160))
+    html_dir = d / "html"
+    hp = html_dir / "index.html"
+    if not hp.exists():
+        return [], ["HTML 不存在，媒体压缩核查跳过（由 HTML 体检统一报错）"]
+    h = hp.read_text(encoding="utf-8", errors="replace")
+    refs = sorted(set(re.findall(r'(?:src|href)\s*=\s*["\']([^"\']+)["\']', h)))
+    media_refs = [r for r in refs if Path(r.split("#")[0].split("?")[0]).suffix.lower() in MEDIA_EXT]
+    probs: list[str] = []
+    try:
+        meta = json.loads((d / "lesson.json").read_text(encoding="utf-8"))
+        title = f"第 {meta.get('no', '?')} 课 {meta.get('zh', '')}".strip()
+    except Exception:
+        title = d.name
+    report = [
+        f"# HTML 媒体压缩核查 · {title}", "",
+        f"- 生成时间：{pecore.now()}",
+        f"- 核查范围：`{html_dir}` 单课 HTML 发布源（网盘 `upload_bundle/` 的未压缩三件套不在此范围）",
+        f"- 视频门槛：<= {max_mb:g} MB / <= {max_h}p / H.264；音频：有损压缩且 <= {max_kbps:g} kbps",
+        f"- HTML 引用的媒体：{', '.join(media_refs) or '（无）'}", "",
+        "| 文件 | 大小 MB | 实测规格 | 判定 | 引用情况 |", "|---|---|---|---|---|",
+    ]
+
+    # 1) 媒体引用必须落在 html/ 内 —— 防止 ../final.mp4 这种把未压缩成片拉进页面
+    for ref in media_refs:
+        if ref.startswith(("http:", "https:", "data:", "//")):
+            continue
+        rel = ref.split("#")[0].split("?")[0]
+        try:
+            (html_dir / rel).resolve().relative_to(html_dir.resolve())
+        except ValueError:
+            probs.append(f"HTML 引用了 html/ 之外的媒体：{ref}（别把未压缩 final.mp4 拉进页面）")
+
+    # 2) 逐文件 ffprobe 实测；未被引用的冗余媒体一样查（发布时可能被一起打包）
+    files = sorted(p for p in html_dir.rglob("*")
+                   if p.is_file() and p.suffix.lower() in MEDIA_EXT)
+    exe = _ffprobe_exe(cfg)
+    if not exe:
+        return (["找不到 ffprobe，媒体压缩核查无法执行（config.yaml 可显式指定 ffprobe 路径）"],
+                ["媒体压缩核查未完成"])
+    nv = na = 0
+    for p in files:
+        rel = p.relative_to(html_dir).as_posix()
+        mb = p.stat().st_size / 1048576
+        try:
+            info = _probe_media(exe, p)
+        except (pecore.PipelineError, ValueError) as e:
+            probs.append(f"{rel}: ffprobe 失败（{e}）")
+            report.append(f"| {rel} | {mb:.2f} | 读取失败 | FAIL | - |")
+            continue
+        fmt = info.get("format", {})
+        v = next((s for s in info.get("streams", []) if s.get("codec_type") == "video"), None)
+        a = next((s for s in info.get("streams", []) if s.get("codec_type") == "audio"), None)
+        try:
+            dur = float(fmt.get("duration") or 0)
+        except (TypeError, ValueError):
+            dur = 0.0
+        bad: list[str] = []
+        if v:
+            nv += 1
+            vh = int(v.get("height") or 0)
+            codec = (v.get("codec_name") or "?").lower()
+            if mb > max_mb:
+                bad.append(f"{mb:.2f}MB > {max_mb:g}MB")
+            if vh > max_h:
+                bad.append(f"{vh}p > {max_h}p")
+            if codec not in ("h264", "avc1"):
+                bad.append(f"编码 {codec} 非 H.264")
+            desc = (f"视频 {codec} {v.get('width')}x{vh} @ {v.get('r_frame_rate')} "
+                    f"· {int(fmt.get('bit_rate') or 0)/1000:.0f} kbps · {dur:.1f}s")
+        elif a:
+            na += 1
+            codec = (a.get("codec_name") or "?").lower()
+            kbps = _audio_kbps(a, fmt, p)
+            if codec not in LOSSY_AUDIO:
+                bad.append(f"{codec} 不是有损压缩（wav/flac 禁止进 HTML）")
+            if not (0 < kbps <= max_kbps):
+                bad.append(f"{kbps:.0f}kbps 超出 <= {max_kbps:g}kbps")
+            desc = (f"音频 {codec} {a.get('sample_rate')}Hz {a.get('channels')}ch "
+                    f"· {kbps:.0f} kbps · {dur:.1f}s")
+        else:
+            bad.append("无音视频流")
+            desc = "无音视频流"
+        verdict = "FAIL" if bad else "PASS"
+        if bad:
+            probs.append(f"{rel}: {'; '.join(bad)}")
+        used = "引用" if rel in media_refs else "未引用(冗余)"
+        report.append(f"| {rel} | {mb:.2f} | {desc} | {verdict} | {used} |")
+
+    if not files:
+        probs.append("html/ 下没有找到任何音视频媒体（单课页面应有压缩音频 / 压缩视频）")
+    final = d / "final.mp4"
+    report += ["", f"- 结论：**{'PASS · 全部压缩达标' if not probs else 'FAIL · ' + str(len(probs)) + ' 项'}**", ""]
+    if probs:
+        report += ["## 问题", ""] + [f"- {p}" for p in probs] + [""]
+        report += ["修复示例（压缩后再放进 html/）：", "",
+                   "```bash", "ffmpeg -i final.mp4 -vf scale=1280:-2 -c:v libx264 -preset medium -crf 30 \\",
+                   "  -profile:v main -pix_fmt yuv420p -c:a aac -b:a 64k -movflags +faststart \\",
+                   "  html/video/lesson.mp4", "```", ""]
+    report += ["## 对照：网盘版（按规范保留未压缩，不进 HTML）", ""]
+    report.append(f"- `final.mp4` {(final.stat().st_size/1048576):.2f} MB —— 带双语字幕 + 片尾的定稿成片"
+                  if final.exists() else "- `final.mp4` 尚未生成")
+    report += ["- `upload_bundle/` 三件套：MP4 / PDF / MP3（MP3 与 HTML 共用同一压缩音轨）", "",
+               "> 阈值来自 `config.yaml`；由 `pe.py build` / `pe.py verify` 的 HTML 体检自动执行。"]
+    (d / "reports").mkdir(parents=True, exist_ok=True)
+    (d / "reports" / "media_audit.md").write_text("\n".join(report) + "\n", encoding="utf-8")
+    notes = [f"媒体压缩实测：{nv} 视频 / {na} 音频，"
+             f"{'全部达标' if not probs else str(len(probs)) + ' 项超规格'}，报告 reports/media_audit.md"]
+    return probs, notes
+
+
+def html_check(d: Path, cfg: dict | None = None) -> tuple[list[str], list[str]]:
+    """HTML 体检：资源存在 / div 配平 / 七 Part / 媒体压缩规格（视频 <=20MB、720p、H.264）。"""
     p = d / "html" / "index.html"
     probs: list[str] = []
     notes: list[str] = []
@@ -122,6 +297,9 @@ def html_check(d: Path) -> tuple[list[str], list[str]]:
     if len(found_parts) < 7:
         notes.append(f"HTML 里只见 Part {sorted(found_parts)}，期望 1–7（Part 7 可选，确认是否为有意省略）")
     notes.append(f"HTML {len(h)/1024:.0f} KB，音频/视频相对引用已核对")
+    mprobs, mnotes = media_audit(d, cfg)
+    probs += mprobs
+    notes += mnotes
     return probs, notes
 
 
@@ -355,6 +533,8 @@ def cmd_qa(args, cfg):
     emit(f"\n报告: {result['report']}")
     if result.get("sheet"):
         emit(f"拼图: {d / result['sheet']}  ← 必须人工扫一眼")
+        emit("[交付] present_files 时把 reports/frames_sheet.jpg 放在第一位、一次不超过 4 个文件，"
+             "别让它折叠进「查看所有产物」（用户 2026-11-08 要求）")
     if result["verdict"] == "FAIL":
         finish(cfg, d, lesson, "qa", "failed", f"{len(result['errors'])} 项未通过")
         emit("\n修好后重跑 `pe.py qa <no>`；通过后 `pe.py approve <no> --stage subs`。")
@@ -401,20 +581,36 @@ def cmd_build(args, cfg):
         pecore.run([pecore.tool("ffmpeg"), "-y", "-i", str(final), "-vn",
                     "-c:a", "libmp3lame", "-b:a", "128k", "-ar", "44100", "-ac", "1",
                     str(full)], timeout=600, check=True)
-    probs, notes = html_check(d)
+    probs, notes = html_check(d, cfg)
+    xhs_probs, xhs_stats = check_xhs(d)
+    if xhs_probs:
+        probs += [f"[文案] {p}" for p in xhs_probs]
+    if xhs_stats:
+        emit(f"[文案字数] 标题 {xhs_stats.get('title_lens')} / 正文 "
+             f"{xhs_stats.get('body_chars')} 字（上限 20 / 1000，话题不计入）")
     _, missing = pecore.check_expected("build", d)
     if missing or probs:
+        media_bad = [p for p in probs if "MB" in p or "kbps" in p or "H.264" in p
+                     or "ffprobe" in p or "html/ 之外" in p]
         finish(cfg, d, lesson, "build", "blocked",
-               f"缺 {len(missing)} 项产物" + (f" / HTML {len(probs)} 处问题" if probs else ""))
+               f"缺 {len(missing)} 项产物" + (f" / HTML {len(probs)} 处问题" if probs else "")
+               + (f"（媒体压缩 {len(media_bad)} 项）" if media_bad else ""))
         todo("build", [f"用 `parent-english-html` 生成 {d / 'html/index.html'} 与 {d / 'pdf/'}；"
                        "英文事实源直接用 subs.json，不要跑 ocr_subs.py",
                        f"用 `video-english-xhs` 生成 {d / 'xhs.txt'}，8 句从 subs.json 的完整清单里挑"]
              + [f"缺: {m}" for m in missing]
              + [f"HTML 问题: {p}" for p in probs[:8]]
+             + (["媒体超规格：视频须 720p / H.264 / <=20MB，音频须 MP3 128k 或 Opus 32k；"
+                 f"逐文件实测见 {d / 'reports/media_audit.md'}"] if media_bad else [])
+             + ([f"文案超字数: {p}（改 xhs.txt 后重跑 build）" for p in xhs_probs]
+                if xhs_probs else [])
              + ["完成后 `pe.py mark <no> build --done`"])
         return 0
+    media_note = next((n for n in notes if n.startswith("媒体压缩实测")), "")
     finish(cfg, d, lesson, "build", "done",
-           f"HTML/MP3/PDF/文案齐备；{'; '.join(notes)[:60]}")
+           f"HTML/MP3/PDF/文案齐备；{media_note}"[:170])
+    if media_note:
+        emit(f"[媒体压缩] {media_note}")
     return 0
 
 
@@ -447,10 +643,17 @@ def cmd_upload(args, cfg):
                                                or dst.stat().st_size != src.stat().st_size):
             shutil.copy2(src, dst)
     root = cfg["netdisk_root"]
+    visible_dir = f"/{root}/{no}.{zh}"
     lines = [f"第 {no} 课 {zh} · 上传清单", f"生成时间: {pecore.now()}",
-             f"夸克目标: /{root}/{no}.{zh}/",
-             f"百度目标: /apps/bdpan/{root}/{no}.{zh}/", "",
-             "双轨交付：HTML 用 720p crf30 压缩视频 + Opus/ogg 分段音频；"
+             f"夸克目标: {visible_dir}/",
+             f"百度用户可见目标: {visible_dir}/  ← 用户打开网盘看的是这里",
+             f"百度 CLI 实际落点: /apps/bdpan{visible_dir}/  ← 应用沙箱，用户不可见",
+             "⚠ bdpan.exe 受开放平台应用权限限制，只能写 /apps/bdpan/；上传后必须用"
+             "百度网盘 MCP 把课程文件夹 file_copy 到用户可见目录，再回读写 "
+             "upload_bundle/remote_check.json，否则 upload 只能标 blocked。",
+             "",
+             "双轨交付：单课 HTML 用 720p crf30 压缩视频(<=20MB) + full.mp3 压缩音轨，"
+             "整站打包源另换 Opus/ogg 分段音频；"
              "网盘用未压缩定稿 MP4（带双语字幕+片尾）+ 整视频 MP3 + PDF",
              "", "三件套（网盘版）："]
     for src, dst in items:
@@ -492,7 +695,8 @@ def cmd_upload(args, cfg):
     lines += ["", "脚本镜像（不碰旧项目）:", f"  {mirror}",
               "  tools/series.json + outputs/亲子英语/<slug>/audio/full.mp3 + 全套PDF/", "",
               "上传：upload_lesson.py 一条命令双传夸克 + 百度（百度走本机 bdpan.exe CLI）",
-              "注意：远端未做自动回读，请在 verify 报告里人工核对文件数与大小。"]
+              "注意：CLI 日志不是成功证据；百度文件落在 /apps/bdpan/ 沙箱，"
+              "必须搬移到用户可见目录并远端回读，upload / verify 才会放行。"]
     (bundle / "manifest.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     script = Path(cfg.get("quark_upload_script", ""))
@@ -522,19 +726,36 @@ def cmd_upload(args, cfg):
     try:
         warns = pecore.normalize_external_result(cp, out)
         for w in warns:
-            emit(f"  [忽略·百度假FAIL] {w.strip()[:140]}")
+            emit(f"  [日志异常·不代表上传成功] {w.strip()[:140]}")
         s = pecore.summarize_upload(out)
-        if s["quark"] < 3 or s["baidu"] < 3:
+        if s["quark"] < 3 or s["baidu_calls"] < 3:
             raise pecore.PipelineError(
-                f"双网盘成功证据不足：夸克 {s['quark']}/3，百度 {s['baidu']}/3。\n"
-                "  百度若为 `FAIL [百度]` 但日志里有 `✓ 已新建上传 (fsid …)`，属已知假 FAIL，"
-                "可到网页端确认后重跑（大小一致会自动 SKIP）。\n"
+                f"CLI 调用条数不足：夸克 {s['quark']}/3，百度 {s['baidu_calls']}/3。\n"
+                "  注意：百度这些行只说明 bdpan.exe 写进了 /apps/bdpan/ 沙箱，"
+                "不代表用户可见目录里有文件。\n"
                 f"  完整日志: {bundle / 'upload_log.txt'}\n{out.strip()[-900:]}")
     except pecore.PipelineError as e:
-        finish(cfg, d, lesson, "upload", "failed", "双网盘上传未确认成功")
+        finish(cfg, d, lesson, "upload", "failed", "双网盘 CLI 调用未跑完")
         raise e
+
+    # 硬性 gate：日志不算成功，必须远端回读百度**用户可见**目录。
+    expected_sizes = {dst.name: dst.stat().st_size for _, dst in items}
+    ok, rproblems = pecore.verify_remote_check(d, expected_sizes, visible_dir)
+    if not ok:
+        finish(cfg, d, lesson, "upload", "blocked",
+               f"CLI 已跑完（夸克 {s['quark']}/3 + 百度 {s['baidu_calls']}/3），"
+               f"但百度远端未回读：{rproblems[0]}")
+        emit("[BLOCKED] 百度侧还没确认用户可见：")
+        for p in rproblems:
+            emit(f"  - {p}")
+        emit(f"  1) 百度网盘 MCP：把 /apps/bdpan{visible_dir} "
+             f"file_copy 到 {visible_dir}（ondup=skip）")
+        emit(f"  2) file_list {visible_dir} 回读 3 个文件名与字节数")
+        emit(f"  3) 写 {pecore.remote_check_path(d)}（格式见 SKILL.md）")
+        emit("  4) 重跑 `pe.py upload <no> --apply` 或 `pe.py verify <no>`")
+        return 0
     finish(cfg, d, lesson, "upload", "done",
-           f"夸克 {s['quark']}/3 + 百度 {s['baidu']}/3；定稿 {target_mp4.name}")
+           f"夸克 {s['quark']}/3 + 百度已回读 {len(expected_sizes)} 个文件；定稿 {target_mp4.name}")
     return 0
 
 
@@ -562,9 +783,21 @@ def cmd_verify(args, cfg):
     if vp and cp_:
         lines += ["", f"## 时长", "", f"- 剪辑 {cp_:.2f}s → 成片 {vp:.2f}s "
                   f"(差 {vp-cp_:.2f}s，目标 {cfg['outro_duration']}s)"]
-    probs, notes = html_check(d)
+    probs, notes = html_check(d, cfg)
     problems += [f"[html] {p}" for p in probs]
-    lines += ["", "## HTML 体检", ""] + [f"- {n}" for n in notes] + [f"- 问题：{p}" for p in probs]
+    lines += ["", "## HTML 体检（含媒体压缩实测，报告 `reports/media_audit.md`）", ""] \
+             + [f"- {n}" for n in notes] + [f"- 问题：{p}" for p in probs]
+
+    # 文案字数：对齐麦田（标题<=20、正文<=1000 码点，话题不计入）
+    xhs_probs, xhs_stats = check_xhs(d)
+    problems += [f"[文案] {p}" for p in xhs_probs]
+    lines += ["", "## 文案字数（麦田口径：标题<=20 / 正文<=1000，话题不计入）", ""]
+    if xhs_stats:
+        lines += [f"- 标题字数：{xhs_stats.get('title_lens')}",
+                  f"- 正文：{xhs_stats.get('body_chars')} 字",
+                  f"- 话题：{xhs_stats.get('topics')} 个",
+                  f"- 置顶评论：{xhs_stats.get('comments')} 条"]
+    lines += ([f"- ⚠ {p}" for p in xhs_probs] if xhs_probs else ["- PASS"])
 
     # 来源标注：用户明确要求每课 HTML 都要写，终验必须查
     by = lesson.get("by") or ""
@@ -594,13 +827,32 @@ def cmd_verify(args, cfg):
         lines += ["", "## 上传包", "", f"- `{man.relative_to(d)}`"]
     else:
         problems.append("[upload] 尚无上传清单")
+
+    # 百度远端回读（硬性 gate）：日志 / fsid / SKIP 一律不算，必须看用户可见目录
+    root = cfg["netdisk_root"]
+    visible_dir = f"/{root}/{lesson['no']}.{lesson.get('zh','')}"
+    prefix = f"{lesson['no']}.{lesson.get('zh','')}."
+    expected_sizes: dict[str, int] = {}
+    for p in sorted((d / "upload_bundle").glob(prefix + "*")):
+        if p.suffix.lower() in (".mp4", ".mp3", ".pdf"):
+            expected_sizes[p.name] = p.stat().st_size
+    ok, rproblems = pecore.verify_remote_check(d, expected_sizes, visible_dir)
+    lines += ["", "## 百度远端回读（硬性 gate）", "",
+              f"- 期望用户可见目录：`{visible_dir}`",
+              f"- 待核文件：{', '.join(sorted(expected_sizes)) or '(无)'}",
+              f"- 结论：{'PASS 已回读且大小一致' if ok else 'FAIL 未通过'}"]
+    if not ok:
+        problems += [f"[百度远端] {p}" for p in rproblems]
+        lines += [f"- ⚠ {p}" for p in rproblems]
+
     lines += ["", "## 人工核对（报告不替代）", "",
               "1. 打开 HTML 看手机端排版、音频能否播、Part 1–7 跳转是否正确。",
               "2. 打开 PDF 看有没有断页/乱码/内容截断。",
-              "3. 到夸克 / 百度网盘确认 3 个文件都在、大小与本地一致（**远端未自动回读**）。",
+              "3. 到夸克网盘确认 3 个文件都在、大小与本地一致（百度侧已由上面的远端回读 gate 自动核对）。",
               "4. 对照 `xhs.txt` 逐字比对英文原句与视频原文。",
               f"5. 确认页头写了 `来源：YouTube {by or '@频道'}`、页脚写了版权声明（用户明确要求）。",
-              "6. 确认 HTML 站里是压缩视频/Opus 音频，网盘里是未压缩定稿 MP4 + 整视频 MP3（别混用）。", "",
+              "6. 确认单课 `html/` 里是压缩视频(<=20MB)/压缩音频，网盘里是未压缩定稿 MP4 + 整视频 MP3（别混用）；"
+              "逐文件实测见 `reports/media_audit.md`。", "",
               f"**CONCLUSION: {'PASS' if not problems else 'FAIL'}（{len(problems)} 项）**"]
     if problems:
         lines += [""] + [f"- {p}" for p in problems]
@@ -631,12 +883,21 @@ def cmd_publish(args, cfg):
     if not txt.exists():
         raise pecore.PipelineError(f"缺 {txt}，先跑 build")
     body = txt.read_text(encoding="utf-8", errors="replace")
+    # 硬闸门：文案超字数就不出清单，免得把不合格文案带进发布流程
+    xhs_probs, xhs_stats = check_xhs(d)
+    if xhs_probs:
+        raise pecore.PipelineError(
+            "publish 被拦：文案字数不合格（麦田也会拒收）。\n  - "
+            + "\n  - ".join(xhs_probs)
+            + "\n  改好 xhs.txt 后重跑 `pe.py publish " + str(lesson["no"]) + "`")
     hits = [w for w in SENSITIVE if w in body]
     lines = [f"第 {lesson['no']} 课 {lesson.get('zh','')} · 发布清单",
              f"生成时间: {pecore.now()}", "",
              f"视频: {d / 'final.mp4'}", f"文案: {txt}", "",
              "发帖前自检：",
-             "  [ ] 标题 <=20 字、3 个备选风格不同",
+             f"  [x] 标题 <=20 字（实测 {xhs_stats.get('title_lens')}）、正文 <=1000 字"
+             f"（实测 {xhs_stats.get('body_chars')}）—— 自动校验已通过",
+             "  [ ] 3 个备选风格不同",
              "  [ ] 8 句英文与视频原文逐字一致",
              "  [ ] 点评里提到的词确实出现在选句中",
              "  [ ] Hook 与本条视频内容相关、且风格不同于上一条",
@@ -656,6 +917,60 @@ def cmd_status(args, cfg):
         emit(json.dumps({"dir": str(d), "lesson": lesson}, ensure_ascii=False, indent=2))
     else:
         emit("\n".join(status_lines(cfg, d, lesson)))
+    return 0
+
+
+# 用户明确要求（2026-11-08）的「六件套」：产物一生成完就要展示在最前面，
+# 不许被中间产物挤进「查看所有产物」折叠区。顺序是用户给的，不要重排。
+DELIVERABLES = [
+    ("字幕抽帧拼图", "reports/frames_sheet.jpg"),
+    ("翻译后成品 MP4", "final.mp4"),
+    ("整视频 MP3", "html/audio/full.mp3"),
+    ("小红书 / 抖音文案", "xhs.txt"),
+    ("打印版 PDF", "pdf/*.pdf"),
+    ("学习页 HTML", "html/index.html"),
+]
+
+
+def cmd_deliver(args, cfg):
+    """按固定顺序列出六件套绝对路径，供编排层一次性 present_files。
+
+    只输出这 6 个，绝不混入 QA 报告 / 手机截图 / 压缩视频 / manifest 等中间产物 ——
+    一次 present 太多会让卡片折叠，用户就又得去「查看所有产物 (N)」里翻。
+    """
+    d, lesson = open_lesson(cfg, args.no)
+    out = []
+    for label, rel in DELIVERABLES:
+        hits = sorted(p for p in d.glob(rel)
+                      if p.is_file() and p.stat().st_size > 0)
+        out.append({"label": label,
+                    "path": str(hits[0]).replace("\\", "/") if hits else None,
+                    "expect": rel})
+    if args.json:
+        emit(json.dumps(out, ensure_ascii=False, indent=2))
+    else:
+        emit(f"第 {lesson['no']} 课 {lesson.get('zh', '')} · 六件套（展示顺序，勿重排）")
+        for i, x in enumerate(out, 1):
+            emit(f"  {i}. {x['label']:<16} {x['path'] or '缺 ' + x['expect']}")
+    return 0
+
+
+def cmd_xhs(args, cfg):
+    """单独体检文案字数（不写状态，只读）。"""
+    d, lesson = open_lesson(cfg, args.no)
+    p = d / "xhs.txt"
+    ok, problems, stats = xhs_check.check_file(p)
+    emit(f"第 {lesson['no']} 课 {lesson.get('zh','')} · 文案字数体检")
+    if stats:
+        emit(f"  标题字数：{stats.get('title_lens')}（上限 20）")
+        emit(f"  正文：{stats.get('body_chars')} 字（上限 1000，话题不计入）")
+        emit(f"  话题：{stats.get('topics')} 个 · 置顶评论：{stats.get('comments')} 条")
+    if problems:
+        for x in problems:
+            emit(f"  - {x}")
+        emit("RESULT: FAIL —— 改 xhs.txt 后重跑；麦田会拒收超字数文案")
+        return 1
+    emit("RESULT: PASS（可直接进 build / publish）")
     return 0
 
 
@@ -707,7 +1022,9 @@ def build_parser():
     add("upload", (["--apply"], {"action": "store_true"}))
     add("verify")
     add("publish")
+    add("xhs")   # 单独体检文案字数（只读）
     add("status")
+    add("deliver")
     sp = add("mark", (["stage"], {"choices": pecore.STAGES}),
              (["--done"], {"action": "store_true"}),
              (["--pending"], {"action": "store_true"}),
@@ -724,7 +1041,8 @@ def main() -> int:
             "cut": cmd_cut, "subs": cmd_subs,
             "qa": cmd_qa, "approve": cmd_approve, "build": cmd_build,
             "upload": cmd_upload, "verify": cmd_verify, "publish": cmd_publish,
-            "status": cmd_status, "mark": cmd_mark,
+            "status": cmd_status, "deliver": cmd_deliver, "mark": cmd_mark,
+            "xhs": cmd_xhs,
         }[args.cmd]
         return fn(args, cfg)
     except pecore.PipelineError as e:

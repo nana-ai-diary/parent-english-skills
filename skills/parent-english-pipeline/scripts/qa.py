@@ -90,6 +90,20 @@ def run_qa(cfg: dict, d: Path, lesson: dict) -> dict:
     if FEN and subs and not any(r[1] == "ERROR" and "宽" in r[2] for r in rows):
         ok("英文宽度", f"全部 {len(subs)} 条 <= {limit}px，最宽 {max(widest)[0]:.0f}px")
 
+    # ---------- 2.5 中英按屏对应（用户 2026-11-08，bilingual-subtitles Step 2.5 规则 3） ----------
+    by_sid: dict[str, list[str]] = {}
+    for s in subs:
+        sid = s.get("sentence_id")
+        if sid is not None:
+            by_sid.setdefault(str(sid), []).append(str(s.get("cn", "")))
+    repeated = sorted(sid for sid, cns in by_sid.items()
+                      if len(cns) > 1 and len(set(cns)) == 1)
+    if repeated:
+        err("中英对应", f"{len(repeated)} 句拆屏后各屏中文完全相同（sid {', '.join(repeated[:6])}）；"
+                        "应按英文切点拆成对应短译文，不要每屏重复整句长译文")
+    else:
+        ok("中英对应", f"{len(by_sid)} 个 sentence_id，拆屏句中文已逐屏分段")
+
     # ---------- 3. 时间轴 ----------
     prev_end = None
     gaps: list[float] = []
@@ -112,6 +126,15 @@ def run_qa(cfg: dict, d: Path, lesson: dict) -> dict:
             warn("空档", f"{len(long_gaps)} 处 >2.5s 无字幕（第 {[i for i, _ in long_gaps][:6]} 条）；长静音可接受，听辨确认")
         else:
             ok("空档", f"最大空档 {max(gaps):.2f}s，gap-fill 正常")
+        # 2026-11-14 第 56 课实测：整片 Whisper 把 61.94-90.14s 共 29.6s 的
+        # 低音量旁白整段判成静音，局部窗口重跑才补回 6 句。长静音 != 无口播。
+        huge = [(i + 2, g) for i, g in enumerate(gaps) if g > 15.0]
+        if huge:
+            warn("疑似漏转", f"{len(huge)} 处 >15s 无字幕（第 "
+                 f"{[i for i, _ in huge]} 条，最长 {max(g for _, g in huge):.1f}s）；"
+                 "整片转录常把低音量旁白/不同说话人整段判成静音，"
+                 "必须对该区间用本机 faster-whisper 局部窗口 vad=True/False 各跑一次，"
+                 "确认真的没有台词后才可标 QA PASS")
 
     # ---------- 4. 完整清单覆盖率 ----------
     man_path = d / "subtitle_manifest.csv"
